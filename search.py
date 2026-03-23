@@ -134,7 +134,10 @@ while not configs_converged(lo, hi, tol=args.tol):
         # Model can't even hit proxy threshold → too small → search higher
         print(f"  ✗ Proxy {proxy_acc:.4f} < {args.proxy_thresh} → TOO SMALL → lo = {cfg}")
         log_entry["verdict"] = "too_small_proxy"
-        lo = cfg                        # raise lower bound
+        if cfg == lo:
+            lo = [l + args.step if l < h else l for l, h in zip(lo, hi)]
+        else:
+            lo = cfg
     else:
         # ── Phase 2: Full training ─────────────────────────────────────────
         print(f"  Phase 2: Full training ({args.full_epochs} epochs)...")
@@ -152,7 +155,10 @@ while not configs_converged(lo, hi, tol=args.tol):
         if full_acc >= args.target_acc:
             print(f"  ✓ {full_acc:.4f} ≥ {args.target_acc} — SUFFICIENT → hi = {cfg}")
             log_entry["verdict"] = "sufficient"
-            hi = cfg                    # tighten upper bound (try smaller)
+            if cfg == hi:
+                hi = [h - args.step if h > l else h for l, h in zip(lo, hi)]
+            else:
+                hi = cfg
             # Track the best (smallest sufficient) model
             if best_config is None or size_mb(DynamicNet(cfg)) < size_mb(DynamicNet(best_config)):
                 best_config = cfg
@@ -161,7 +167,10 @@ while not configs_converged(lo, hi, tol=args.tol):
         else:
             print(f"  ✗ {full_acc:.4f} < {args.target_acc} — INSUFFICIENT → lo = {cfg}")
             log_entry["verdict"] = "insufficient"
-            lo = cfg                    # raise lower bound (need bigger)
+            if cfg == lo:
+                lo = [l + args.step if l < h else l for l, h in zip(lo, hi)]
+            else:
+                lo = cfg
 
     results_log.append(log_entry)
 
