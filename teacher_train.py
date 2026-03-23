@@ -63,6 +63,17 @@ unlab_ds = STL10(root=args.data, split="unlabeled", download=True, transform=cle
 val_ld   = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=2, pin_memory=True)
 unlab_ld = DataLoader(unlab_ds, batch_size=args.batch, shuffle=False, num_workers=2, pin_memory=True)
 
+class PseudoDataset(torch.utils.data.Dataset):
+    def __init__(self, x_tensor, y_tensor):
+        self.x = x_tensor
+        self.y = y_tensor.tolist() # converts tensor of ints to python int list
+        
+    def __len__(self):
+        return len(self.x)
+        
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx]
+
 # Helper to generate the current active training loader
 def get_active_loader(epoch, pseudo_dataset=None):
     if epoch <= args.burn_in or pseudo_dataset is None:
@@ -170,7 +181,7 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
             # Since all_x is already normalized by clean_tf, we need to apply spatial transforms manually,
             # or wrap it in a custom class. To save compute, we'll just train on them as-is (clean_tf).
             # The original 5k handles the augmentation.
-            pseudo_dataset = TensorDataset(all_x, all_y)
+            pseudo_dataset = PseudoDataset(all_x, all_y)
             print(f"✅ Successfully extracted {len(all_x)} high-confidence images!\n")
         else:
             print("⚠ No images passed the strictness threshold. Continuing with labeled data only.\n")
