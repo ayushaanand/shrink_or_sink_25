@@ -1,0 +1,19 @@
+Shrink_or_Sink/
+updated_rulebook_compressed.pdf
+
+# Python caches
+__pycache__/
+*.pyc
+
+# PyTorch
+*.pth
+*.pt
+
+# Data
+data/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Other
+search_results.json
