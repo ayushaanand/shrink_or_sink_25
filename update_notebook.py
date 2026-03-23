@@ -13,7 +13,7 @@ for cell in nb['cells']:
             'from dynamic_model import DynamicNet, size_mb, param_count\n',
             '\n',
             'lo = [8, 16, 32, 64]\n',
-            'hi = [64, 128, 256, 512]\n',
+            'hi = [64, 128, 256, 256]\n',
             '\n',
             'print(f"Search Space Bounds:\\n")\n',
             'print(f"  lo: {lo} -> {size_mb(DynamicNet(lo)):.4f} MB ({param_count(DynamicNet(lo)):,} params)")\n',
@@ -21,17 +21,11 @@ for cell in nb['cells']:
         ]
     elif cell.get('id') == 'aa11':
         cell['source'] = [
-            '## 🔍 Step 4 — Run the Architecture Binary Search\n',
+            '## 🛑 STOP HERE FOR NOW\n',
             '\n',
-            '**Flags:**\n',
-            '| Flag | Default | Meaning |\n',
-            '|------|---------|----------|\n',
-            '| `--lo` | `8 16 32` | Lower bound configuration |\n',
-            '| `--hi` | `64 128 256` | Upper bound configuration |\n',
-            '| `--proxy-epochs` | 20 | Fast vibe-check: skip models staying below proxy-thresh |\n',
-            '| `--full-epochs` | 100 | Full training for models that pass the vibe check |\n',
-            '| `--proxy-thresh` | 0.65 | If proxy acc < 0.65, treat architecture as too small |\n',
-            '| `--target-acc` | 0.85 | The 85% threshold required for score points |'
+            '> Since we are focusing exclusively on training the **Ultimate Teacher** (200 Epochs), you do not need to run the Search phase yet.\n',
+            '> \n',
+            '> You can just leave this Colab tab open, let the cell above run for the next few hours, and check back periodically. It will autosave `teacher_latest.pth` to your Google Drive every epoch.'
         ]
     elif cell.get('id') == 'aa12':
         cell['source'] = [
@@ -41,7 +35,7 @@ for cell in nb['cells']:
             "    --data ./data \\\n",
             "    --teacher {TEACHER_PATH} \\\n",
             "    --lo 8 16 32 64 \\\n",
-            "    --hi 64 128 256 512 \\\n",
+            "    --hi 64 128 256 256 \\\n",
             "    --proxy-epochs 20 \\\n",
             "    --full-epochs 100 \\\n",
             "    --proxy-thresh 0.65 \\\n",

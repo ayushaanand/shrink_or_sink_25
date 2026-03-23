@@ -8,6 +8,7 @@ __pycache__/
 # PyTorch
 *.pth
 *.pt
+*.tmp
 
 # Data
 data/

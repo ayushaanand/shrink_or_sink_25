@@ -13,13 +13,13 @@ Example progression (3-layer search):
     ... until hi - lo ≤ tol in every dimension.
 
 Usage:
-    python search.py --data ./data \\
-                     --teacher teacher.pth \\
-                     --lo  8  16  32  \\
+    python search.py --data ./data \
+                     --teacher teacher.pth \
+                     --lo  8  16  32  \
                      --hi 64 128 256
 
     # 4-layer search:
-    python search.py --lo  8 16  32  64 --hi 64 128 256 512
+    python search.py --lo  8 16  32  64 --hi 64 128 256 256
 """
 
 import argparse
