@@ -83,7 +83,9 @@ def get_active_loader(epoch, pseudo_dataset=None):
     else:
         combined_ds = ConcatDataset([train_ds, pseudo_dataset])
         print(f"  [Loader] Using combined {len(combined_ds)} images (Mastery Phase).")
-        return DataLoader(combined_ds, batch_size=args.batch, shuffle=True, num_workers=2, pin_memory=True)
+        # Set num_workers=0 here! A huge in-memory tensor duplicated across multiple workers 
+        # causes a 'copy-on-write' memory explosion and crashes Kaggle system RAM after many epochs.
+        return DataLoader(combined_ds, batch_size=args.batch, shuffle=True, num_workers=0, pin_memory=True)
 
 
 # ── CutMix Implementation ──────────────────────────────────────────────────────
