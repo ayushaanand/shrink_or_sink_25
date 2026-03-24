@@ -116,35 +116,41 @@ def cutmix_criterion(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
 
-# ── Model & Optimizer ──────────────────────────────────────────────────────────
+# ── Model & State Loading ──────────────────────────────────────────────────────
 # Using ResNet-50 for maximum knowledge extraction. Size doesn't matter here.
 teacher = models.resnet50(weights=None)
 teacher.fc = nn.Linear(teacher.fc.in_features, 10)
+
 if args.weights and os.path.exists(args.weights):
     print(f"Loading pretrained weights from '{args.weights}' for Warm Restart...")
     teacher.load_state_dict(torch.load(args.weights, map_location=device))
-teacher = teacher.to(device)
-
-optimizer = torch.optim.AdamW(teacher.parameters(), lr=1e-3, weight_decay=1e-4)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS)
-criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-
 
 # ── Checkpoint State Variables ─────────────────────────────────────────────────
 start_epoch = 1
 best_acc = 0.0
 pseudo_dataset = None
-
+ckpt = None
 
 # ── Load Checkpoint (The "Unkillable" Logic) ───────────────────────────────────
 if os.path.exists(args.checkpoint):
     print(f"\n[RESUME] Found checkpoint at '{args.checkpoint}'. Loading...")
     ckpt = torch.load(args.checkpoint, map_location=device)
     teacher.load_state_dict(ckpt['model_state'])
-    optimizer.load_state_dict(ckpt['optimizer_state'])
-    scheduler.load_state_dict(ckpt['scheduler_state'])
     start_epoch = ckpt['epoch'] + 1
     best_acc = ckpt['best_acc']
+
+teacher = teacher.to(device)
+if torch.cuda.device_count() > 1:
+    print(f"Using {torch.cuda.device_count()} GPUs for Training!")
+    teacher = nn.DataParallel(teacher)
+
+optimizer = torch.optim.AdamW(teacher.parameters(), lr=1e-3, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS)
+criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+if ckpt is not None:
+    optimizer.load_state_dict(ckpt['optimizer_state'])
+    scheduler.load_state_dict(ckpt['scheduler_state'])
     
     # If we crashed during Mastery, we need to rebuild the pseudo-labels instantly
     if start_epoch > args.burn_in:
@@ -234,10 +240,12 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
 
     
     # ── Robust Save ──
+    save_state = teacher.module.state_dict() if isinstance(teacher, nn.DataParallel) else teacher.state_dict()
+    
     if acc > best_acc:
         best_acc = acc
         # Save the final best weights specifically for the search.py
-        torch.save(teacher.state_dict(), args.out)
+        torch.save(save_state, args.out)
 
     # Save the resumption checkpoint every epoch
     # We save to a temp file and rename to avoid corruption if Colab dies exactly during save
@@ -248,7 +256,7 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
     
     torch.save({
         'epoch': epoch,
-        'model_state': teacher.state_dict(),
+        'model_state': save_state,
         'optimizer_state': optimizer.state_dict(),
         'scheduler_state': scheduler.state_dict(),
         'best_acc': best_acc

@@ -68,9 +68,15 @@ def train(args):
     train_ld = DataLoader(train_ds, batch_size=128, shuffle=True, num_workers=2, pin_memory=True)
 
     teacher = get_teacher(args.teacher_path, device)
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs for Teacher!")
+        teacher = nn.DataParallel(teacher)
     
     print("Initializing tiny Student Model from model.py...")
     student = DynamicNet().to(device)
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs for Student!")
+        student = nn.DataParallel(student)
     
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -100,7 +106,8 @@ def train(args):
         print(f"Epoch {epoch} | Loss: {total_loss/len(train_ld):.4f}")
 
     print(f"\nTraining Complete! Saving final weights to '{args.out}'...")
-    torch.save(student.state_dict(), args.out)
+    save_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
+    torch.save(save_state, args.out)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
