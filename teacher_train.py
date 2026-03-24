@@ -31,6 +31,7 @@ parser.add_argument("--batch", type=int, default=128)
 parser.add_argument("--burn-in", type=int, default=50)
 parser.add_argument("--mastery", type=int, default=150)
 parser.add_argument("--strictness", type=float, default=0.98, help="Confidence threshold for pseudo-labels")
+parser.add_argument("--weights", type=str, default="", help="Path to initialized weights (for finetuning/warm restart)")
 args = parser.parse_args()
 
 TOTAL_EPOCHS = args.burn_in + args.mastery
@@ -119,6 +120,9 @@ def cutmix_criterion(criterion, pred, y_a, y_b, lam):
 # Using ResNet-50 for maximum knowledge extraction. Size doesn't matter here.
 teacher = models.resnet50(weights=None)
 teacher.fc = nn.Linear(teacher.fc.in_features, 10)
+if args.weights and os.path.exists(args.weights):
+    print(f"Loading pretrained weights from '{args.weights}' for Warm Restart...")
+    teacher.load_state_dict(torch.load(args.weights, map_location=device))
 teacher = teacher.to(device)
 
 optimizer = torch.optim.AdamW(teacher.parameters(), lr=1e-3, weight_decay=1e-4)

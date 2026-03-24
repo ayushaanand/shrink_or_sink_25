@@ -17,6 +17,15 @@ for cell in nb['cells']:
             '5. Run binary search to find smallest model ≥ 85%\n',
             '6. Inspect and save results'
         ]
+    elif cell.get('id') == 'aa02':
+        cell['source'] = []
+    elif cell.get('id') == 'aa05':
+        cell['source'] = [
+            '!rm -rf Shrink_or_Sink\n',
+            '!git clone https://github.com/ayushaanand/Shrink_or_Sink.git\n',
+            '%cd Shrink_or_Sink\n',
+            '!pip install torch torchvision tqdm -q\n'
+        ]
     elif cell.get('id') == 'aa06':
         cell['source'] = ['## 📊 Step 2 — Define Search Bounds\n']
     elif cell.get('id') == 'aa07':
@@ -43,7 +52,7 @@ for cell in nb['cells']:
             "    print('✅ Teacher already finalized and saved. Skipping.')\n",
             'else:\n',
             '    !python teacher_train.py \\\n',
-            '        --data ./data \\\n',
+            '        --data /content/data \\\n',
             '        --out {TEACHER_PATH} \\\n',
             '        --checkpoint {DRIVE_DIR}/teacher_latest.pth\n'
         ]
@@ -68,16 +77,20 @@ for cell in nb['cells']:
         cell['source'] = [
             "STUDENT_OUT = f'{DRIVE_DIR}/best_student.pth'\n",
             "\n",
-            "!python search.py \\\n",
-            "    --data ./data \\\n",
-            "    --teacher {TEACHER_PATH} \\\n",
-            "    --lo 8 16 32 64 \\\n",
-            "    --hi 64 128 256 256 \\\n",
-            "    --proxy-epochs 20 \\\n",
-            "    --full-epochs 100 \\\n",
-            "    --proxy-thresh 0.65 \\\n",
-            "    --target-acc 0.85 \\\n",
-            "    --out {STUDENT_OUT}\n"
+            "import os\n",
+            "if not os.path.exists(TEACHER_PATH):\n",
+            "    print('🛑 STOP: Teacher is not finished training yet! Wait for Phase 3 to complete.')\n",
+            "else:\n",
+            "    !python search.py \\\n",
+            "        --data /content/data \\\n",
+            "        --teacher {TEACHER_PATH} \\\n",
+            "        --lo 8 16 32 64 \\\n",
+            "        --hi 64 128 256 256 \\\n",
+            "        --proxy-epochs 20 \\\n",
+            "        --full-epochs 100 \\\n",
+            "        --proxy-thresh 0.65 \\\n",
+            "        --target-acc 0.85 \\\n",
+            "        --out {STUDENT_OUT}\n"
         ]
     elif cell.get('id') == 'aa14':
         cell['source'] = [
