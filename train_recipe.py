@@ -145,7 +145,8 @@ def train_student(student, teacher, train_loader, val_loader,
         marker = ""
         if acc > best_acc:
             best_acc = acc
-            best_state = {k: v.cpu().clone() for k, v in student.state_dict().items()}
+            raw_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
+            best_state = {k: v.cpu().clone() for k, v in raw_state.items()}
             marker = "  ← best"
 
         if verbose:

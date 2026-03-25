@@ -9,6 +9,8 @@ Usage:
 """
 
 import argparse
+import os
+import time
 import random
 import numpy as np
 import torch
@@ -22,6 +24,7 @@ from model import DynamicNet
 
 def set_seed(seed=42):
     """Ensures deterministic, reproducible training as mandated by the rulebook."""
+    os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -29,6 +32,13 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
+def seed_worker(worker_id):
+    """Ensures each DataLoader worker process has an independent, reproducible random seed."""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 def kd_loss(logits, teacher_logits, labels, T=4.0, alpha=0.9):
     """Knowledge Distillation Loss combining hard labels and soft teacher probabilities."""
@@ -39,15 +49,27 @@ def kd_loss(logits, teacher_logits, labels, T=4.0, alpha=0.9):
     ) * (T * T)
     return (1. - alpha) * loss_ce + alpha * loss_kd
 
-def get_teacher(path, device):
-    """Loads the pre-trained Ultimate Teacher (ResNet-50) for distillation."""
-    print(f"Loading Teacher Model from '{path}'...")
-    teacher = models.resnet50(weights=None)
-    teacher.fc = nn.Linear(teacher.fc.in_features, 10)
-    teacher.load_state_dict(torch.load(path, map_location=device))
-    teacher = teacher.to(device)
-    teacher.eval()
-    return teacher
+def get_teacher(path, device, retries=3):
+    """Loads the pre-trained Ultimate Teacher (ResNet-50) robustly against network I/O failures."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"\n🚨 CRITICAL ERROR: The teacher weights file was not found at '{path}'. "
+                                f"Please make sure you have attached the Dataset correctly in the Kaggle UI!")
+        
+    for attempt in range(retries):
+        try:
+            print(f"Loading Teacher Model from '{path}' (Attempt {attempt+1}/{retries})...")
+            teacher = models.resnet50(weights=None)
+            teacher.fc = nn.Linear(teacher.fc.in_features, 10)
+            teacher.load_state_dict(torch.load(path, map_location=device))
+            teacher = teacher.to(device)
+            teacher.eval()
+            print(f"✅ Teacher securely loaded from '{path}'\n")
+            return teacher
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to load teacher: {e}. Retrying in 5 seconds...")
+            time.sleep(5)
+            
+    raise RuntimeError("🚨 CRITICAL ERROR: Failed to load teacher after multiple attempts. The file might be corrupted.")
 
 def train(args):
     set_seed(42)
@@ -65,7 +87,19 @@ def train(args):
     
     print(f"Loading STL-10 training set to '{args.dataset_path}'...")
     train_ds = datasets.STL10(root=args.dataset_path, split="train", download=True, transform=train_tf)
-    train_ld = DataLoader(train_ds, batch_size=128, shuffle=True, num_workers=2, pin_memory=True)
+    
+    g = torch.Generator()
+    g.manual_seed(42)
+    
+    train_ld = DataLoader(
+        train_ds, 
+        batch_size=128, 
+        shuffle=True, 
+        num_workers=2, 
+        pin_memory=True,
+        worker_init_fn=seed_worker,
+        generator=g
+    )
 
     teacher = get_teacher(args.teacher_path, device)
     if torch.cuda.device_count() > 1:

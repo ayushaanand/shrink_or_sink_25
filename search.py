@@ -24,6 +24,8 @@ Usage:
 
 import argparse
 import json
+import time
+import os
 import torch
 import torch.nn as nn
 from torchvision import models
@@ -51,6 +53,8 @@ parser.add_argument("--proxy-thresh",  type=float, default=0.65,
 parser.add_argument("--target-acc",    type=float, default=0.85)
 parser.add_argument("--batch",         type=int,   default=128)
 parser.add_argument("--lr",            type=float, default=1e-3)
+parser.add_argument("--teacher-min-acc", type=float, default=0.82,
+                    help="Minimum teacher val acc required to proceed")
 parser.add_argument("--out",           type=str,   default="best_student.pth")
 args = parser.parse_args()
 
@@ -70,25 +74,70 @@ print(f"Search bounds:")
 print(f"  lo = {args.lo}  ({size_mb(DynamicNet(args.lo)):.4f} MB)")
 print(f"  hi = {args.hi}  ({size_mb(DynamicNet(args.hi)):.4f} MB)\n")
 
-# ── Load teacher ──────────────────────────────────────────────────────────────
-teacher = models.resnet18(weights=None)
-teacher.fc = nn.Linear(teacher.fc.in_features, 10)
-teacher.load_state_dict(torch.load(args.teacher, map_location=device))
-teacher = teacher.to(device).eval()
-print(f"✅ Teacher loaded from '{args.teacher}'\n")
+# ── Load teacher securely ─────────────────────────────────────────────────────
+def load_teacher_safe(path, device, retries=3):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"\n🚨 CRITICAL ERROR: The teacher weights file was not found at '{path}'. "
+                                f"Please make sure you have attached the Dataset correctly in the Kaggle UI!")
+        
+    for attempt in range(retries):
+        try:
+            print(f"Loading Teacher Model from '{path}' (Attempt {attempt+1}/{retries})...")
+            # Fixed critical bug: Previously ResNet-18, changed to correct ResNet-50
+            t_model = models.resnet50(weights=None)
+            t_model.fc = nn.Linear(t_model.fc.in_features, 10)
+            t_model.load_state_dict(torch.load(path, map_location=device))
+            t_model = t_model.to(device).eval()
+            print(f"✅ Teacher securely loaded from '{path}'\n")
+            return t_model
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to load teacher: {e}. Retrying in 5 seconds...")
+            time.sleep(5)
+            
+    raise RuntimeError("🚨 CRITICAL ERROR: Failed to load teacher after multiple attempts. The file might be corrupted.")
+
+teacher = load_teacher_safe(args.teacher, device)
+if torch.cuda.device_count() > 1:
+    print(f"Using {torch.cuda.device_count()} GPUs for Teacher inference!")
+    teacher = nn.DataParallel(teacher)
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
 train_ld, val_ld = get_loaders(args.data, batch_size=args.batch)
+
+# ── Verifying Teacher Quality ─────────────────────────────────────────────────
+print("Evaluating loaded teacher model on validation set to ensure quality...")
+correct = 0
+total = 0
+with torch.no_grad():
+    for x, y in val_ld:
+        x, y = x.to(device), y.to(device)
+        out = teacher(x)
+        correct += (out.argmax(1) == y).sum().item()
+        total += y.size(0)
+        
+teacher_acc = correct / total
+print(f"Teacher Validation Accuracy: {teacher_acc:.4f}  ({teacher_acc*100:.2f}%)")
+
+if teacher_acc < args.teacher_min_acc:
+    raise ValueError(f"\n🚨 CRITICAL ERROR: The loaded Teacher only reached {teacher_acc*100:.2f}% accuracy. "
+                     f"This is strictly below your required {args.teacher_min_acc*100:.2f}% limit. "
+                     f"Distilling from a poorly trained teacher will cripple your student model permanently. Aborting search.")
+print("✅ Teacher quality verified. Proceeding to student search...\n")
 
 # ── Interpolating Binary Search ───────────────────────────────────────────────
 lo = list(args.lo)
 hi = list(args.hi)
 
-results_log = []
-best_config = None
-best_acc    = 0.0
-best_state  = None
-iteration   = 0
+results_log    = []
+# Best-by-SIZE: smallest model that still hits target_acc
+best_config    = None
+best_acc       = 0.0
+best_state     = None
+# Best-by-ACC: highest accuracy model seen regardless of size
+best_acc_config = None
+best_acc_val    = 0.0
+best_acc_state  = None
+iteration      = 0
 
 print("=" * 65)
 print("Starting Interpolating Binary Search")
@@ -106,6 +155,8 @@ while not configs_converged(lo, hi, tol=args.tol):
     print("─" * 65)
 
     student = DynamicNet(cfg).to(device)
+    if torch.cuda.device_count() > 1:
+        student = nn.DataParallel(student)
 
     # ── Phase 1: Proxy training ────────────────────────────────────────────
     print(f"  Phase 1: Proxy ({args.proxy_epochs} epochs)...")
@@ -122,7 +173,8 @@ while not configs_converged(lo, hi, tol=args.tol):
     log_entry = {
         "iteration": iteration,
         "config":    cfg,
-        "mb":        mb,
+        "params":    params,
+        "mb":        round(mb, 4),
         "lo":        lo[:],
         "hi":        hi[:],
         "proxy_acc": proxy_acc,
@@ -142,6 +194,8 @@ while not configs_converged(lo, hi, tol=args.tol):
         # ── Phase 2: Full training ─────────────────────────────────────────
         print(f"  Phase 2: Full training ({args.full_epochs} epochs)...")
         student = DynamicNet(cfg).to(device)   # fresh weights
+        if torch.cuda.device_count() > 1:
+            student = nn.DataParallel(student)
         full_acc, _ = train_student(
             student, teacher, train_ld, val_ld,
             epochs=args.full_epochs,
@@ -159,11 +213,12 @@ while not configs_converged(lo, hi, tol=args.tol):
                 hi = [h - args.step if h > l else h for l, h in zip(lo, hi)]
             else:
                 hi = cfg
-            # Track the best (smallest sufficient) model
+            # Track the best-by-SIZE (smallest sufficient model)
             if best_config is None or size_mb(DynamicNet(cfg)) < size_mb(DynamicNet(best_config)):
                 best_config = cfg
                 best_acc    = full_acc
-                best_state  = {k: v.cpu().clone() for k, v in student.state_dict().items()}
+                raw_state   = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
+                best_state  = {k: v.cpu().clone() for k, v in raw_state.items()}
         else:
             print(f"  ✗ {full_acc:.4f} < {args.target_acc} — INSUFFICIENT → lo = {cfg}")
             log_entry["verdict"] = "insufficient"
@@ -172,9 +227,27 @@ while not configs_converged(lo, hi, tol=args.tol):
             else:
                 lo = cfg
 
+        # Track best-by-ACCURACY (highest accuracy seen, regardless of size)
+        if full_acc > best_acc_val:
+            best_acc_val    = full_acc
+            best_acc_config = cfg
+            raw_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
+            best_acc_state = {k: v.cpu().clone() for k, v in raw_state.items()}
+            # Save immediately so a crash doesn't lose this
+            _tmp = DynamicNet(cfg)
+            _tmp.load_state_dict(best_acc_state)
+            torch.save(_tmp.state_dict(), args.out + ".best_acc.pth")
+            print(f"  🥇 New accuracy record! {full_acc:.4f} — saved to '{args.out}.best_acc.pth'")
+
+        # Print live leaderboard
+        print(f"\n  ── Live Leaderboard ──")
+        if best_config:
+            print(f"     Best-by-SIZE : {best_config}  |  {size_mb(DynamicNet(best_config)):.4f} MB  |  acc={best_acc:.4f}")
+        print(f"     Best-by-ACC  : {best_acc_config}  |  {size_mb(DynamicNet(best_acc_config)) if best_acc_config else 0:.4f} MB  |  acc={best_acc_val:.4f}")
+
     results_log.append(log_entry)
 
-# ── Report ─────────────────────────────────────────────────────────────────────
+# ── Final Report ──────────────────────────────────────────────────────────────
 print("\n" + "=" * 65)
 print("Search Converged")
 print(f"  Final bounds:  lo={lo}  hi={hi}")
@@ -182,19 +255,29 @@ print("=" * 65)
 
 if best_config:
     mb = size_mb(DynamicNet(best_config))
-    print(f"\n  🏆 Winner config : {best_config}")
-    print(f"     Val accuracy  : {best_acc:.4f}  ({best_acc*100:.2f}%)")
-    print(f"     Est. size     : {mb:.4f} MB")
-
+    print(f"\n  🏆 Winner (Smallest passing model):")
+    print(f"     Config       : {best_config}")
+    print(f"     Params       : {param_count(DynamicNet(best_config)):,}")
+    print(f"     Size         : {mb:.4f} MB")
+    print(f"     Val Accuracy : {best_acc:.4f}  ({best_acc*100:.2f}%)")
     student = DynamicNet(best_config)
     student.load_state_dict(best_state)
     torch.save(student.state_dict(), args.out)
-    print(f"     Saved to      : {args.out}")
+    print(f"     Saved to     : '{args.out}'")
 else:
     print("\n  ⚠ No config met the target accuracy within these bounds.")
     print("    Try widening --hi or adjusting --target-acc.")
 
-# Save results log
+if best_acc_config:
+    mb2 = size_mb(DynamicNet(best_acc_config))
+    print(f"\n  🥇 Best Accuracy Model (may be larger):")
+    print(f"     Config       : {best_acc_config}")
+    print(f"     Params       : {param_count(DynamicNet(best_acc_config)):,}")
+    print(f"     Size         : {mb2:.4f} MB")
+    print(f"     Val Accuracy : {best_acc_val:.4f}  ({best_acc_val*100:.2f}%)")
+    print(f"     Saved to     : '{args.out}.best_acc.pth'  (already on disk)")
+
+# Save full results log
 log_path = "search_results.json"
 with open(log_path, "w") as f:
     json.dump(results_log, f, indent=2)
