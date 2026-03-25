@@ -153,7 +153,9 @@ def train_student(student, teacher, train_loader, val_loader,
             print(f"  Epoch {epoch:>3}/{epochs}  loss={loss:.4f}  val={acc:.4f}{marker}")
 
     # Restore best weights into the student
+    # If wrapped in DataParallel, load into the inner .module (no `module.` prefix in best_state)
     if best_state is not None:
-        student.load_state_dict(best_state)
+        target = student.module if isinstance(student, nn.DataParallel) else student
+        target.load_state_dict(best_state)
 
     return best_acc, acc_curve

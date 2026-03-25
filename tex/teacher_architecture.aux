@@ -1,0 +1,27 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Overview of the Training Pipeline}{2}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}The ResNet-50 Architecture}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Residual Block}{2}{subsection.2.1}\protected@file@percent }
+\newlabel{eq:residual}{{1}{2}{Residual Block}{equation.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Full Network Composition}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Phase A: Supervised Burn-in (Epochs 1--50)}{3}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Loss Function}{3}{subsection.3.1}\protected@file@percent }
+\newlabel{eq:label_smooth}{{10}{3}{Loss Function}{equation.10}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}CutMix Augmentation}{3}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Phase B: Pseudo-Label Generation (Epoch 51)}{3}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Phase C: Mastery Training (Epochs 51--200)}{4}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Optimizer: AdamW}{4}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Cosine Annealing LR Schedule}{4}{subsection.5.2}\protected@file@percent }
+\newlabel{eq:cosine}{{24}{4}{Cosine Annealing LR Schedule}{equation.24}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Gradient Clipping}{5}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Multi-GPU Data Parallelism}{5}{section.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Mathematical Formulation}{5}{subsection.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Implementation Note: State Dict Keys}{5}{subsection.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Expected Validation Accuracy Trajectory}{6}{section.7}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Summary of training hyperparameters for the Ultimate Teacher Model.}}{7}{table.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Full Training Algorithm}{7}{section.8}\protected@file@percent }
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces Ultimate Teacher Training Pipeline}}{7}{algorithm.1}\protected@file@percent }
+\gdef \@abspage@last{7}

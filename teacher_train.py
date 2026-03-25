@@ -15,15 +15,26 @@ Usage:
 
 import argparse
 import os
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models, transforms
 from torchvision.datasets import STL10
 from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
-from tqdm import tqdm
 import numpy as np
 from PIL import Image
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+set_seed(42)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=str, default="./data")
@@ -126,8 +137,12 @@ teacher = models.resnet50(weights=None)
 teacher.fc = nn.Linear(teacher.fc.in_features, 10)
 
 if args.weights and os.path.exists(args.weights):
-    print(f"Loading pretrained weights from '{args.weights}' for Warm Restart...")
-    teacher.load_state_dict(torch.load(args.weights, map_location=device))
+    print(f"[WEIGHTS] Loading warm-start weights from '{args.weights}'...")
+    state = torch.load(args.weights, map_location=device)
+    teacher.load_state_dict(state)
+    print(f"[WEIGHTS] ✅ Warm-start weights loaded successfully.")
+elif args.weights:
+    print(f"[WEIGHTS] ⚠️  --weights path '{args.weights}' not found. Starting from scratch.")
 
 # ── Checkpoint State Variables ─────────────────────────────────────────────────
 start_epoch = 1
@@ -138,15 +153,38 @@ ckpt = None
 # ── Load Checkpoint (The "Unkillable" Logic) ───────────────────────────────────
 if os.path.exists(args.checkpoint):
     print(f"\n[RESUME] Found checkpoint at '{args.checkpoint}'. Loading...")
+    print(f"[RESUME] NOTE: Checkpoint weights will OVERRIDE --weights if both are provided.")
     ckpt = torch.load(args.checkpoint, map_location=device)
     teacher.load_state_dict(ckpt['model_state'])
     start_epoch = ckpt['epoch'] + 1
     best_acc = ckpt['best_acc']
+    print(f"[RESUME] ✅ Resumed from Epoch {ckpt['epoch']} | Best Acc so far: {best_acc:.4f}")
+else:
+    print(f"[RESUME] No checkpoint found at '{args.checkpoint}'. Starting fresh.")
 
 teacher = teacher.to(device)
 if torch.cuda.device_count() > 1:
     print(f"Using {torch.cuda.device_count()} GPUs for Training!")
     teacher = nn.DataParallel(teacher)
+
+# ── Quick Sanity Validation ────────────────────────────────────────────────────
+# Verifies loaded weights are meaningful (>80%) before wasting hours of training
+if args.weights or os.path.exists(args.checkpoint):
+    print("\n[SANITY] Running quick validation pass on loaded weights...")
+    teacher.eval()
+    correct = 0
+    with torch.no_grad():
+        for x, y in val_ld:
+            x, y = x.to(device), y.to(device)
+            correct += (teacher(x).argmax(1) == y).sum().item()
+    sanity_acc = correct / len(val_ds)
+    print(f"[SANITY] Loaded weights Val Accuracy: {sanity_acc:.4f} ({sanity_acc*100:.2f}%)")
+    if sanity_acc < 0.80:
+        raise ValueError(f"\n🚨 ABORT: Loaded weights only achieve {sanity_acc*100:.2f}% accuracy. "
+                         f"This is below the 80% safety threshold. "
+                         f"The weights may be corrupted or from a poorly trained run. "
+                         f"Fix --weights / --checkpoint path before wasting GPU hours!")
+    print(f"[SANITY] ✅ Weights are healthy. Proceeding to training...\n")
 
 optimizer = torch.optim.AdamW(teacher.parameters(), lr=1e-3, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS)
@@ -176,8 +214,10 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
         confident_indices, confident_y = [], []
         
         idx_offset = 0
+        n_batches = len(unlab_ld)
+        print_every = max(1, n_batches // 10)
         with torch.no_grad():
-            for ux, _ in tqdm(unlab_ld, desc="Inferencing"):
+            for batch_i, (ux, _) in enumerate(unlab_ld):
                 ux = ux.to(device)
                 probs = F.softmax(teacher(ux), dim=1)
                 max_probs, preds = torch.max(probs, dim=1)
@@ -190,6 +230,9 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
                     confident_y.append(preds[mask].cpu())
                 
                 idx_offset += len(ux)
+                if (batch_i + 1) % print_every == 0 or (batch_i + 1) == n_batches:
+                    pct = (batch_i + 1) / n_batches * 100
+                    print(f"  [Phase B] {pct:.0f}% ({batch_i+1}/{n_batches} batches) | Confident so far: {sum(len(c) for c in confident_indices)}")
         
         if len(confident_indices) > 0:
             all_indices = torch.cat(confident_indices)
@@ -230,8 +273,10 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
     # ── PHASE A / C: Train ──
     teacher.train()
     running_loss = 0.0
+    n_batches = len(active_ld)
+    print_every = max(1, n_batches // 10)
 
-    for x, y in tqdm(active_ld, desc="Training", leave=False):
+    for batch_i, (x, y) in enumerate(active_ld):
         x, y = x.to(device), y.to(device)
         
         # Apply CutMix 50% of the time to combat pseudo-label noise
@@ -248,6 +293,11 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
         torch.nn.utils.clip_grad_norm_(teacher.parameters(), max_norm=1.0)
         optimizer.step()
         running_loss += loss.item()
+
+        if (batch_i + 1) % print_every == 0 or (batch_i + 1) == n_batches:
+            pct = (batch_i + 1) / n_batches * 100
+            avg = running_loss / (batch_i + 1)
+            print(f"  [Train] {pct:.0f}% | batch {batch_i+1}/{n_batches} | avg_loss={avg:.4f}")
 
     scheduler.step()
 
