@@ -22,6 +22,8 @@ from torchvision import models, transforms
 from torchvision.datasets import STL10
 from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
 from tqdm import tqdm
+import numpy as np
+from PIL import Image
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=str, default="./data")
@@ -171,8 +173,9 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
     if epoch > args.burn_in and pseudo_dataset is None:
         print(f"\n🔍 [PHASE B] Generating strict >{args.strictness*100}% pseudo-labels on 100k unlabeled dataset...")
         teacher.eval()
-        confident_x, confident_y = [], []
+        confident_indices, confident_y = [], []
         
+        idx_offset = 0
         with torch.no_grad():
             for ux, _ in tqdm(unlab_ld, desc="Inferencing"):
                 ux = ux.to(device)
@@ -182,19 +185,40 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
                 # Keep only predictions where probability > strictness
                 mask = max_probs > args.strictness
                 if mask.any():
-                    # Move to CPU immediately to prevent GPU memory explosion
-                    confident_x.append(ux[mask].cpu())
+                    batch_indices = torch.arange(idx_offset, idx_offset + len(ux))
+                    confident_indices.append(batch_indices[mask.cpu()])
                     confident_y.append(preds[mask].cpu())
+                
+                idx_offset += len(ux)
         
-        if len(confident_x) > 0:
-            all_x = torch.cat(confident_x)
+        if len(confident_indices) > 0:
+            all_indices = torch.cat(confident_indices)
             all_y = torch.cat(confident_y)
-            # Create a dataset but apply the training transforms so the new images get augmented during training!
-            # Since all_x is already normalized by clean_tf, we need to apply spatial transforms manually,
-            # or wrap it in a custom class. To save compute, we'll just train on them as-is (clean_tf).
-            # The original 5k handles the augmentation.
-            pseudo_dataset = PseudoDataset(all_x, all_y)
-            print(f"✅ Successfully extracted {len(all_x)} high-confidence images!\n")
+            
+            # Avoid 10GB float32 RAM explosion! Just save indices and read original uint8 data dynamically
+            class DynamicLabelSubset(torch.utils.data.Dataset):
+                def __init__(self, base_dataset, indices, labels, transform):
+                    self.base_data = base_dataset.data
+                    self.indices = indices.tolist()
+                    self.labels = labels.tolist()
+                    self.transform = transform
+                    
+                def __len__(self):
+                    return len(self.indices)
+                    
+                def __getitem__(self, i):
+                    real_idx = self.indices[i]
+                    # STL10 underlying data shape: (N, 3, 96, 96). Needs transpose for PIL
+                    img = self.base_data[real_idx]
+                    img = np.transpose(img, (1, 2, 0))
+                    img = Image.fromarray(img)
+                    if self.transform is not None:
+                        img = self.transform(img)
+                    return img, self.labels[i]
+
+            # Apply `train_tf` so pseudo-labeled images receive heavy augmentation during mastery
+            pseudo_dataset = DynamicLabelSubset(unlab_ds, all_indices, all_y, train_tf)
+            print(f"✅ Successfully extracted {len(all_indices)} high-confidence images!\n")
         else:
             print("⚠ No images passed the strictness threshold. Continuing with labeled data only.\n")
 
