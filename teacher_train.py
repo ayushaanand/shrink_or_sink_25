@@ -328,7 +328,9 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
     temp_ckpt = args.checkpoint + ".tmp"
     
     # Ensure directory exists (e.g., if args.checkpoint is deeply nested)
-    os.makedirs(os.path.dirname(args.checkpoint), exist_ok=True)
+    ckpt_dir = os.path.dirname(args.checkpoint)
+    if ckpt_dir:
+        os.makedirs(ckpt_dir, exist_ok=True)
     
     torch.save({
         'epoch': epoch,

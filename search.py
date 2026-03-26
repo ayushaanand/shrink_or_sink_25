@@ -55,6 +55,9 @@ parser.add_argument("--batch",         type=int,   default=128)
 parser.add_argument("--lr",            type=float, default=1e-3)
 parser.add_argument("--teacher-min-acc", type=float, default=0.82,
                     help="Minimum teacher val acc required to proceed")
+parser.add_argument("--proxy-ratio",   type=float, default=0.85,
+                    help="Proxy threshold = proxy_ratio * hi's accuracy at proxy_epochs. "
+                         "Smaller values give small models more benefit of the doubt.")
 parser.add_argument("--out",           type=str,   default="best_student.pth")
 args = parser.parse_args()
 
@@ -124,6 +127,44 @@ if teacher_acc < args.teacher_min_acc:
                      f"Distilling from a poorly trained teacher will cripple your student model permanently. Aborting search.")
 print("✅ Teacher quality verified. Proceeding to student search...\n")
 
+# ── Pre-validate hi: calibrate proxy threshold + confirm hi reaches target ─────────
+print("=" * 65)
+print(f"Pre-validating upper bound hi={args.hi}...")
+print(f"  Step 1: {args.proxy_epochs} proxy epochs to calibrate dynamic threshold")
+print(f"  Step 2: remaining {args.full_epochs - args.proxy_epochs} epochs to confirm ≥{args.target_acc*100:.0f}%")
+print("=" * 65)
+
+_hi_student = DynamicNet(args.hi).to(device)
+if torch.cuda.device_count() > 1:
+    _hi_student = nn.DataParallel(_hi_student)
+
+# Step 1: proxy run — get hi's epoch-N accuracy as calibration baseline
+_, _hi_proxy_curve = train_student(
+    _hi_student, teacher, train_ld, val_ld,
+    epochs=args.proxy_epochs, device=device, lr=args.lr, verbose=False,
+)
+hi_proxy_acc = max(_hi_proxy_curve)
+dynamic_proxy_thresh = round(hi_proxy_acc * args.proxy_ratio, 4)
+print(f"  hi proxy acc  @ epoch {args.proxy_epochs}: {hi_proxy_acc:.4f}")
+print(f"  proxy_ratio   : {args.proxy_ratio}")
+print(f"  → dynamic_proxy_thresh = {dynamic_proxy_thresh:.4f}  "
+      f"({dynamic_proxy_thresh*100:.2f}% required at epoch {args.proxy_epochs} to proceed)")
+
+# Step 2: continue hi training to full_epochs to confirm it can hit target
+_hi_acc, _ = train_student(
+    _hi_student, teacher, train_ld, val_ld,
+    epochs=args.full_epochs - args.proxy_epochs, device=device, lr=args.lr, verbose=False,
+)
+print(f"  hi full acc   @ epoch {args.full_epochs}: {_hi_acc:.4f} ({_hi_acc*100:.2f}%)")
+if _hi_acc < args.target_acc:
+    raise ValueError(
+        f"\n🚨 ABORT: Upper bound hi={args.hi} only reached {_hi_acc*100:.2f}% — "
+        f"below your {args.target_acc*100:.0f}% target even after full training. "
+        f"Widen --hi or lower --target-acc!"
+    )
+print(f"\u2705 hi confirmed sufficient ({_hi_acc:.4f} ≥ {args.target_acc}). Starting search!\n")
+del _hi_student  # free VRAM before search begins
+
 # ── Interpolating Binary Search ───────────────────────────────────────────────
 lo = list(args.lo)
 hi = list(args.hi)
@@ -142,6 +183,7 @@ iteration      = 0
 print("=" * 65)
 print("Starting Interpolating Binary Search")
 print("=" * 65)
+
 
 while not configs_converged(lo, hi, tol=args.tol):
     iteration += 1
@@ -182,9 +224,9 @@ while not configs_converged(lo, hi, tol=args.tol):
         "verdict":   None,
     }
 
-    if proxy_acc < args.proxy_thresh:
+    if proxy_acc < dynamic_proxy_thresh:
         # Model can't even hit proxy threshold → too small → search higher
-        print(f"  ✗ Proxy {proxy_acc:.4f} < {args.proxy_thresh} → TOO SMALL → lo = {cfg}")
+        print(f"  ✗ Proxy {proxy_acc:.4f} < {dynamic_proxy_thresh:.4f} (={args.proxy_ratio}×hi) → TOO SMALL → lo = {cfg}")
         log_entry["verdict"] = "too_small_proxy"
         if cfg == lo:
             lo = [l + args.step if l < h else l for l, h in zip(lo, hi)]
