@@ -2,49 +2,69 @@ import torch
 import torch.nn as nn
 
 # [TEMPLATE] Set this to the winning configuration found by the Binary Architecture Search!
-WINNING_WIDTHS = [8, 16, 32] 
+WINNING_WIDTHS = [32, 64, 128]
+WINNING_DEPTHS = [2, 2, 2]
+
+class DepthwiseSeparableConv(nn.Module):
+    """Depthwise spatial conv -> Pointwise 1x1 conv -> BN -> ReLU."""
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=stride, padding=1, groups=in_ch, bias=False),
+            nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class Stage(nn.Module):
+    """A stage of N depthwise separable blocks. First block downsamples."""
+    def __init__(self, in_ch: int, out_ch: int, depth: int):
+        super().__init__()
+        assert depth >= 1, "Stage depth must be at least 1."
+        layers = []
+        layers.append(DepthwiseSeparableConv(in_ch, out_ch, stride=2))
+        for _ in range(depth - 1):
+            layers.append(DepthwiseSeparableConv(out_ch, out_ch, stride=1))
+        self.stage = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.stage(x)
+
 
 class DynamicNet(nn.Module):
     """
     Dynamically constructs a Convolutional Neural Network.
-    The depth and width of the network are controlled by the `widths` list.
     """
-    def __init__(self, widths=WINNING_WIDTHS):
+    def __init__(self, widths=WINNING_WIDTHS, depths=WINNING_DEPTHS):
         super().__init__()
-        assert len(widths) >= 2, "widths list must contain at least 2 layer sizes"
-        
-        # Initial Convolutional Block
-        self.conv1 = nn.Conv2d(3, widths[0], kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(widths[0])
-        self.relu = nn.ReLU(inplace=True)
-        self.pool = nn.MaxPool2d(2, 2)
-        
-        # Dynamic Feature Construction
+        assert len(widths) >= 1, "Need at least one width."
+        if depths is None:
+            depths = [1] * len(widths)
+        assert len(widths) == len(depths), "widths and depths must strongly match."
+
+        # A standard initial Conv block mapping 3 -> widths[0]
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(3, widths[0], kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(widths[0]),
+            nn.ReLU(inplace=True),
+        )
+
         layers = []
         in_ch = widths[0]
-        
-        for w in widths[1:]:
-            layers.append(nn.Conv2d(in_ch, w, kernel_size=3, padding=1))
-            layers.append(nn.BatchNorm2d(w))
-            layers.append(nn.ReLU(inplace=True))
-            layers.append(nn.MaxPool2d(2, 2))
-            in_ch = w
-            
+        for i, (out_ch, depth) in enumerate(zip(widths, depths)):
+            layers.append(Stage(in_ch, out_ch, depth))
+            in_ch = out_ch
+
         self.features = nn.Sequential(*layers)
-        
-        # Classification Head
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(in_ch, 10)
-        
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(widths[-1], 10)
+
     def forward(self, x):
         x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.pool(x)
-        
         x = self.features(x)
-        x = self.avgpool(x)
-        
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
-        return x
+        x = self.pool(x).flatten(1)
+        return self.classifier(x)

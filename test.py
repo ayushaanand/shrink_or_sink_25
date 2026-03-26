@@ -32,7 +32,10 @@ def evaluate(dataset_path, model_path):
     model = DynamicNet() # Automatically uses WINNING_WIDTHS fallback
     
     print(f"Loading weights from '{model_path}'...")
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    state_dict = torch.load(model_path, map_location=device)
+    # The file is saved as FP16, so we convert back to FP32 for standard inference evaluation
+    state_dict = {k: v.float() for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
 

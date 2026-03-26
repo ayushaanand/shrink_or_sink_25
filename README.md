@@ -8,11 +8,11 @@ This repository contains our official submission for the *Shrink or Sink Model C
 ---
 
 ## 🏗️ 1. Model Architecture
-Our final model (`model.py`) is a custom-designed Convolutional Neural Network identified computationally via **Progressive Capacity Expansion (PCE) Binary Search**. 
+Our final model (`model.py`) is a custom-designed Convolutional Neural Network identified computationally via **2D Progressive Capacity Expansion (PCE) Interpolating Binary Search**. 
 
-Instead of starting with a massive architecture and pruning it down, our scripts dynamically built thousands of candidate architectures with varying layer widths, trained them briefly to evaluate "capacity viability," and aggressively converged on the absolute theoretical minimum parameter count capable of breaking the 85% barrier. 
+Instead of starting with a massive architecture and pruning it down, our scripts dynamically built thousands of candidate architectures using **Depthwise Separable Convolutions** (inspired by MobileNet). The search sweeps over both `widths` (channels) and `depths` (blocks per stage) to evaluate "capacity viability," aggressively converging on the absolute theoretical minimum parameter count capable of breaking the 85% barrier. 
 
-The dynamically discovered optimal widths for the convolution stages are hardcoded in `model.py`.
+The dynamically discovered optimal boundaries for the stages are hardcoded in `model.py` as `WINNING_WIDTHS` and `WINNING_DEPTHS`.
 
 ---
 

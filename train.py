@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+
 
 from model import DynamicNet
 
@@ -120,7 +120,7 @@ def train(args):
         student.train()
         total_loss = 0.0
         
-        for x, y in tqdm(train_ld, desc=f"Epoch {epoch}/{args.epochs}", leave=False):
+        for step, (x, y) in enumerate(train_ld):
             x, y = x.to(device), y.to(device)
             
             with torch.no_grad():
@@ -139,7 +139,8 @@ def train(args):
         scheduler.step()
         print(f"Epoch {epoch} | Loss: {total_loss/len(train_ld):.4f}")
 
-    print(f"\nTraining Complete! Saving final weights to '{args.out}'...")
+    print(f"\nTraining Complete! Saving final weights (FP16 Compressed) to '{args.out}'...")
+    student.half() # Cast weights to 16-bit to cut file size by 50%
     save_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
     torch.save(save_state, args.out)
 

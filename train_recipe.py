@@ -15,9 +15,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
+import os
+import random
+import numpy as np
 from torchvision.datasets import STL10
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 # ── Normalisation stats for STL-10 ────────────────────────────────────────────
 STL10_MEAN = [0.4467, 0.4398, 0.4066]
@@ -37,12 +39,29 @@ VAL_TRANSFORM = transforms.Compose([
 ])
 
 
+def set_seed(seed=42):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 def get_loaders(data_root: str, batch_size: int = 128):
     """Return (train_loader, val_loader) for the standard STL-10 split."""
+    set_seed(42)
+    g = torch.Generator()
+    g.manual_seed(42)
+
     train_ds = STL10(root=data_root, split="train", download=True, transform=TRAIN_TRANSFORM)
     val_ds   = STL10(root=data_root, split="test",  download=True, transform=VAL_TRANSFORM)
     train_ld = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                          num_workers=2, pin_memory=True)
+                          num_workers=2, pin_memory=True, worker_init_fn=seed_worker, generator=g)
     val_ld   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
                           num_workers=2, pin_memory=True)
     return train_ld, val_ld
