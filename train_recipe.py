@@ -11,6 +11,13 @@ Key choices:
 - Loss:         KD loss (soft targets from teacher) + hard Cross-Entropy
 """
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import transforms
+import os
+import random
+import numpy as np
 from torchvision.datasets import STL10
 from torch.utils.data import DataLoader, ConcatDataset, Subset
 import time
