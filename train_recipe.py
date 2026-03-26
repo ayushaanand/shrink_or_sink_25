@@ -19,7 +19,7 @@ import os
 import random
 import numpy as np
 from torchvision.datasets import STL10
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 
 # ── Normalisation stats for STL-10 ────────────────────────────────────────────
 STL10_MEAN = [0.4467, 0.4398, 0.4066]
@@ -59,8 +59,11 @@ def get_loaders(data_root: str, batch_size: int = 128):
     g.manual_seed(42)
 
     train_ds = STL10(root=data_root, split="train", download=True, transform=TRAIN_TRANSFORM)
+    unlab_ds = STL10(root=data_root, split="unlabeled", download=True, transform=TRAIN_TRANSFORM)
     val_ds   = STL10(root=data_root, split="test",  download=True, transform=VAL_TRANSFORM)
-    train_ld = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+    
+    combined_ds = ConcatDataset([train_ds, unlab_ds])
+    train_ld = DataLoader(combined_ds, batch_size=batch_size, shuffle=True,
                           num_workers=2, pin_memory=True, worker_init_fn=seed_worker, generator=g)
     val_ld   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
                           num_workers=2, pin_memory=True)
@@ -108,7 +111,10 @@ def train_one_epoch(student, teacher, loader, optimizer, device) -> float:
             t_logits = teacher(x)
 
         s_logits = student(x)
-        loss = kd_loss(s_logits, t_logits, y)
+        
+        # Inject Knowledge Distillation pseudo-labels for the Unlabeled Dataset
+        hard_labels = torch.where(y == -1, t_logits.argmax(dim=1), y)
+        loss = kd_loss(s_logits, t_logits, hard_labels)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
         optimizer.step()
@@ -139,8 +145,8 @@ def train_student(student, teacher, train_loader, val_loader,
     Full training loop for a student model under KD.
 
     Returns:
-        best_acc: highest val accuracy achieved
-        acc_curve: list of per-epoch val accuracies (for proxy checks)
+        final_acc: validation accuracy at the final epoch
+        acc_curve: list of per-epoch val accuracies
     """
     optimizer = torch.optim.AdamW(student.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -151,9 +157,7 @@ def train_student(student, teacher, train_loader, val_loader,
         optimizer, T_0=max(1, epochs // 3), T_mult=1
     )
 
-    best_acc = 0.0
     acc_curve = []
-    best_state = None
 
     for epoch in range(1, epochs + 1):
         loss = train_one_epoch(student, teacher, train_loader, optimizer, device)
@@ -161,20 +165,7 @@ def train_student(student, teacher, train_loader, val_loader,
         acc = evaluate(student, val_loader, device)
         acc_curve.append(acc)
 
-        marker = ""
-        if acc > best_acc:
-            best_acc = acc
-            raw_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
-            best_state = {k: v.cpu().clone() for k, v in raw_state.items()}
-            marker = "  ← best"
-
         if verbose:
-            print(f"  Epoch {epoch:>3}/{epochs}  loss={loss:.4f}  val={acc:.4f}{marker}")
+            print(f"  Epoch {epoch:>3}/{epochs}  loss={loss:.4f}  val={acc:.4f}")
 
-    # Restore best weights into the student
-    # If wrapped in DataParallel, load into the inner .module (no `module.` prefix in best_state)
-    if best_state is not None:
-        target = student.module if isinstance(student, nn.DataParallel) else student
-        target.load_state_dict(best_state)
-
-    return best_acc, acc_curve
+    return acc_curve[-1], acc_curve

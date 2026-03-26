@@ -132,7 +132,7 @@ _, _hi_proxy_curve = train_student(
     _hi_student, teacher, train_ld, val_ld,
     epochs=args.proxy_epochs, device=device, lr=args.lr, verbose=True,
 )
-hi_proxy_acc = max(_hi_proxy_curve)
+hi_proxy_acc = _hi_proxy_curve[-1]
 dynamic_proxy_thresh = round(hi_proxy_acc * args.proxy_ratio, 4)
 print(f"  hi proxy acc  @ epoch {args.proxy_epochs}: {hi_proxy_acc:.4f}")
 print(f"  → dynamic_proxy_thresh = {dynamic_proxy_thresh:.4f}  "
@@ -203,7 +203,7 @@ while not check_convergence(lo, hi, lo_d, hi_d):
         student, teacher, train_ld, val_ld,
         epochs=args.proxy_epochs, device=device, lr=args.lr, verbose=True,
     )
-    proxy_acc = max(acc_curve)
+    proxy_acc = acc_curve[-1]
     print(f"  Proxy best acc: {proxy_acc:.4f}")
 
     log_entry = {
