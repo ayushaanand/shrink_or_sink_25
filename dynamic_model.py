@@ -13,20 +13,36 @@ import torch.nn as nn
 
 
 class DepthwiseSeparableConv(nn.Module):
-    """Depthwise spatial conv -> Pointwise 1x1 conv -> BN -> ReLU."""
+    """MobileNet/ResNet-style Depthwise Separable Block with Identity Skip."""
     def __init__(self, in_ch: int, out_ch: int, stride: int = 1):
         super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=stride, padding=1, groups=in_ch, bias=False),
-            nn.BatchNorm2d(in_ch),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-        )
+        self.use_res_connect = stride == 1 and in_ch == out_ch
+        
+        # Depthwise
+        self.dw_conv = nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=stride, padding=1, groups=in_ch, bias=False)
+        self.dw_bn = nn.BatchNorm2d(in_ch)
+        self.dw_relu = nn.ReLU(inplace=True)
+        
+        # Pointwise
+        self.pw_conv = nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False)
+        self.pw_bn = nn.BatchNorm2d(out_ch)
+        
+        self.out_relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        return self.block(x)
+        identity = x
+        
+        out = self.dw_conv(x)
+        out = self.dw_bn(out)
+        out = self.dw_relu(out)
+        
+        out = self.pw_conv(out)
+        out = self.pw_bn(out)
+        
+        if self.use_res_connect:
+            out += identity
+            
+        return self.out_relu(out)
 
 
 class Stage(nn.Module):
