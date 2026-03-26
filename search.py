@@ -49,6 +49,8 @@ parser.add_argument("--teacher-min-acc", type=float, default=0.82,
                     help="Minimum teacher val acc required to proceed")
 parser.add_argument("--proxy-ratio",   type=float, default=0.85,
                     help="Proxy threshold = proxy_ratio * hi's accuracy at proxy_epochs. ")
+parser.add_argument("--direct-thresh", type=float, default=None,
+                    help="Skip Phase 1 'hi' pre-validation and force this dynamic threshold.")
 parser.add_argument("--out",           type=str,   default="best_student.pth")
 args = parser.parse_args()
 
@@ -117,40 +119,47 @@ if teacher_acc < args.teacher_min_acc:
 print("✅ Teacher quality verified. Proceeding to student search...\n")
 
 # ── Pre-validate hi: calibrate proxy threshold + confirm hi reaches target ─────────
-print("=" * 65)
-print(f"Pre-validating upper bound hi_w={args.hi} hi_d={args.hi_depth}...")
-print(f"  Step 1: {args.proxy_epochs} proxy epochs to calibrate dynamic threshold")
-print(f"  Step 2: remaining {args.full_epochs - args.proxy_epochs} epochs to confirm ≥{args.target_acc*100:.0f}% target")
-print("=" * 65)
+if args.direct_thresh is not None:
+    dynamic_proxy_thresh = args.direct_thresh
+    print("=" * 65)
+    print(f"[STRATEGY] Skipping 'hi' pre-validation!")
+    print(f"Hardcoding dynamic_proxy_thresh = {dynamic_proxy_thresh:.4f}")
+    print("=" * 65)
+else:
+    print("=" * 65)
+    print(f"Pre-validating upper bound hi_w={args.hi} hi_d={args.hi_depth}...")
+    print(f"  Step 1: {args.proxy_epochs} proxy epochs to calibrate dynamic threshold")
+    print(f"  Step 2: remaining {args.full_epochs - args.proxy_epochs} epochs to confirm ≥{args.target_acc*100:.0f}% target")
+    print("=" * 65)
 
-_hi_student = DynamicNet(args.hi, args.hi_depth).to(device)
-if torch.cuda.device_count() > 1:
-    _hi_student = nn.DataParallel(_hi_student)
+    _hi_student = DynamicNet(args.hi, args.hi_depth).to(device)
+    if torch.cuda.device_count() > 1:
+        _hi_student = nn.DataParallel(_hi_student)
 
-# Step 1: proxy run — VERBOSE enabled as requested by user!
-_, _hi_proxy_curve = train_student(
-    _hi_student, teacher, train_ld, val_ld,
-    epochs=args.proxy_epochs, device=device, lr=args.lr, verbose=True,
-)
-hi_proxy_acc = _hi_proxy_curve[-1]
-dynamic_proxy_thresh = round(hi_proxy_acc * args.proxy_ratio, 4)
-print(f"  hi proxy acc  @ epoch {args.proxy_epochs}: {hi_proxy_acc:.4f}")
-print(f"  → dynamic_proxy_thresh = {dynamic_proxy_thresh:.4f}  "
-      f"({dynamic_proxy_thresh*100:.2f}% required at epoch {args.proxy_epochs} to proceed)\n")
-
-# Step 2: continue hi training to full_epochs to confirm hitting target
-_hi_acc, _ = train_student(
-    _hi_student, teacher, train_ld, val_ld,
-    epochs=args.full_epochs - args.proxy_epochs, device=device, lr=args.lr, verbose=True,
-)
-print(f"  hi full acc   @ epoch {args.full_epochs}: {_hi_acc:.4f} ({_hi_acc*100:.2f}%)")
-if _hi_acc < args.target_acc:
-    raise ValueError(
-        f"\n🚨 ABORT: Upper bound hi_w={args.hi} hi_d={args.hi_depth} only reached {_hi_acc*100:.2f}% "
-        f"— below your {args.target_acc*100:.0f}% target. Widen --hi/--hi-depth or lower --target-acc!"
+    # Step 1: proxy run — VERBOSE enabled as requested by user!
+    _, _hi_proxy_curve = train_student(
+        _hi_student, teacher, train_ld, val_ld,
+        epochs=args.proxy_epochs, device=device, lr=args.lr, verbose=True,
     )
-print(f"\u2705 hi confirmed sufficient ({_hi_acc:.4f} ≥ {args.target_acc}). Starting search!\n")
-del _hi_student
+    hi_proxy_acc = _hi_proxy_curve[-1]
+    dynamic_proxy_thresh = round(hi_proxy_acc * args.proxy_ratio, 4)
+    print(f"  hi proxy acc  @ epoch {args.proxy_epochs}: {hi_proxy_acc:.4f}")
+    print(f"  → dynamic_proxy_thresh = {dynamic_proxy_thresh:.4f}  "
+          f"({dynamic_proxy_thresh*100:.2f}% required at epoch {args.proxy_epochs} to proceed)\n")
+
+    # Step 2: continue hi training to full_epochs to confirm hitting target
+    _hi_acc, _ = train_student(
+        _hi_student, teacher, train_ld, val_ld,
+        epochs=args.full_epochs - args.proxy_epochs, device=device, lr=args.lr, verbose=True,
+    )
+    print(f"  hi full acc   @ epoch {args.full_epochs}: {_hi_acc:.4f} ({_hi_acc*100:.2f}%)")
+    if _hi_acc < args.target_acc:
+        raise ValueError(
+            f"\n🚨 ABORT: Upper bound hi_w={args.hi} hi_d={args.hi_depth} only reached {_hi_acc*100:.2f}% "
+            f"— below your {args.target_acc*100:.0f}% target. Widen --hi/--hi-depth or lower --target-acc!"
+        )
+    print(f"\u2705 hi confirmed sufficient ({_hi_acc:.4f} ≥ {args.target_acc}). Starting search!\n")
+    del _hi_student
 
 # ── Interpolating Binary Search ───────────────────────────────────────────────
 lo = list(args.lo)
