@@ -95,7 +95,7 @@ if torch.cuda.device_count() > 1:
     teacher = nn.DataParallel(teacher)
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
-train_ld, val_ld = get_loaders(args.data, batch_size=args.batch)
+train_ld, val_ld = get_loaders(args.data, teacher=teacher, device=device, batch_size=args.batch)
 
 # ── Verifying Teacher Quality ─────────────────────────────────────────────────
 print("Evaluating loaded teacher model on validation set to ensure quality...")
@@ -180,10 +180,18 @@ def check_convergence(l_w, h_w, l_d, h_d):
     d_conv = configs_converged(l_d, h_d, tol=1)
     return w_conv and d_conv
 
+evaluated_lo = False
+
 while not check_convergence(lo, hi, lo_d, hi_d):
     iteration += 1
-    cfg = midpoint(lo, hi, step=args.step)
-    cfg_d = midpoint_depth(lo_d, hi_d)
+    
+    if not evaluated_lo:
+        cfg, cfg_d = list(lo), list(lo_d)
+        evaluated_lo = True
+        print("\n  [STRATEGY] Evaluating pure 'lo' bound first to check instant victory!")
+    else:
+        cfg = midpoint(lo, hi, step=args.step)
+        cfg_d = midpoint_depth(lo_d, hi_d)
 
     mb = size_mb(DynamicNet(cfg, cfg_d), dtype_bytes=2) # FP16 sizing
     params = param_count(DynamicNet(cfg, cfg_d))

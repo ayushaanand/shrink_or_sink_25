@@ -11,15 +11,9 @@ Key choices:
 - Loss:         KD loss (soft targets from teacher) + hard Cross-Entropy
 """
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torchvision import transforms
-import os
-import random
-import numpy as np
 from torchvision.datasets import STL10
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, Subset
+import time
 
 # ── Normalisation stats for STL-10 ────────────────────────────────────────────
 STL10_MEAN = [0.4467, 0.4398, 0.4066]
@@ -52,21 +46,52 @@ def seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-def get_loaders(data_root: str, batch_size: int = 128):
+def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 128, top_k: int = 15000):
     """Return (train_loader, val_loader) for the standard STL-10 split."""
     set_seed(42)
     g = torch.Generator()
     g.manual_seed(42)
 
+    # 1. Load the pristine training data setup
     train_ds = STL10(root=data_root, split="train", download=True, transform=TRAIN_TRANSFORM)
-    unlab_ds = STL10(root=data_root, split="unlabeled", download=True, transform=TRAIN_TRANSFORM)
     val_ds   = STL10(root=data_root, split="test",  download=True, transform=VAL_TRANSFORM)
     
-    combined_ds = ConcatDataset([train_ds, unlab_ds])
+    # 2. Extract Top-K Confident Images from the 100k Unlabeled Pool
+    if teacher is not None and device is not None:
+        print(f"\n[DATA] Sweeping 100k Unlabeled Dataset to find the Top {top_k:,} most mathematically confident images...")
+        clean_unlab_ds = STL10(root=data_root, split="unlabeled", download=True, transform=VAL_TRANSFORM)
+        eval_ld = DataLoader(clean_unlab_ds, batch_size=512, shuffle=False, num_workers=0, pin_memory=True)
+        
+        teacher.eval()
+        all_confs = []
+        with torch.no_grad():
+            for x, _ in eval_ld:
+                x = x.to(device)
+                probs = F.softmax(teacher(x), dim=1)
+                confs, _ = torch.max(probs, dim=1)
+                all_confs.append(confs.cpu())
+                
+        all_confs = torch.cat(all_confs)
+        
+        # Sort indices by highest confidence
+        top_indices = torch.argsort(all_confs, descending=True)[:top_k].tolist()
+        
+        # Reload the unlabeled set but explicitly map it to the heavy Training Augmentations
+        aug_unlab_ds = STL10(root=data_root, split="unlabeled", download=False, transform=TRAIN_TRANSFORM)
+        unlab_subset = Subset(aug_unlab_ds, top_indices)
+        
+        combined_ds = ConcatDataset([train_ds, unlab_subset])
+        print(f"[DATA] Teacher Confidence Sweep Complete!")
+        print(f"[DATA] Distillation Pipeline Locked: {len(train_ds):,} Labeled + {len(unlab_subset):,} Elite Unlabeled = {len(combined_ds):,} Total Images/Epoch.\n")
+    else:
+        combined_ds = train_ds
+        print(f"\n[DATA] Using ONLY {len(train_ds):,} Labeled images (No teacher provided).\n")
+    
+    # Strictly zero workers to prevent Kaggle IO/Memory Multiprocessing Deadlocks
     train_ld = DataLoader(combined_ds, batch_size=batch_size, shuffle=True,
-                          num_workers=2, pin_memory=True, worker_init_fn=seed_worker, generator=g)
+                          num_workers=0, pin_memory=True, worker_init_fn=seed_worker, generator=g)
     val_ld   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                          num_workers=2, pin_memory=True)
+                          num_workers=0, pin_memory=True)
     return train_ld, val_ld
 
 
@@ -160,12 +185,14 @@ def train_student(student, teacher, train_loader, val_loader,
     acc_curve = []
 
     for epoch in range(1, epochs + 1):
+        start_time = time.time()
         loss = train_one_epoch(student, teacher, train_loader, optimizer, device)
         scheduler.step()
         acc = evaluate(student, val_loader, device)
         acc_curve.append(acc)
 
+        epoch_time = time.time() - start_time
         if verbose:
-            print(f"  Epoch {epoch:>3}/{epochs}  loss={loss:.4f}  val={acc:.4f}")
+            print(f"  Epoch {epoch:>3}/{epochs}  loss={loss:.4f}  val={acc:.4f}  ({epoch_time:.1f}s)")
 
     return acc_curve[-1], acc_curve
