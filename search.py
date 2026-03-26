@@ -256,6 +256,16 @@ while not check_convergence(lo, hi, lo_d, hi_d):
         )
         log_entry["full_acc"] = full_acc
         print(f"  Full best acc:  {full_acc:.4f}")
+        
+        # Save this exact configuration regardless of whether it wins or loses
+        raw_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
+        w_str = "-".join(map(str, cfg))
+        d_str = "-".join(map(str, cfg_d))
+        ckpt_name = f"student_w{w_str}_d{d_str}_acc{full_acc:.4f}.pth"
+        _tmp = DynamicNet(cfg, cfg_d)
+        _tmp.load_state_dict({k: v.cpu().clone() for k, v in raw_state.items()})
+        torch.save(_tmp.half().state_dict(), ckpt_name)
+        print(f"  [SAVE] Intermediate sweep checkpoint secured: '{ckpt_name}'")
 
         if full_acc >= args.target_acc:
             print(f"  ✓ {full_acc:.4f} ≥ {args.target_acc} — SUFFICIENT → hi = current")
