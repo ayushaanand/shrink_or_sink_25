@@ -53,48 +53,20 @@ def seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 128, top_k: int = 15000):
-    """Return (train_loader, val_loader) for the standard STL-10 split."""
+def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 128):
+    """Return (train_loader, val_loader) using the massive 105k Distillation pool with safe Kaggle workers."""
     set_seed(42)
     g = torch.Generator()
     g.manual_seed(42)
 
-    # 1. Load the pristine training data setup
     train_ds = STL10(root=data_root, split="train", download=True, transform=TRAIN_TRANSFORM)
+    unlab_ds = STL10(root=data_root, split="unlabeled", download=True, transform=TRAIN_TRANSFORM)
     val_ds   = STL10(root=data_root, split="test",  download=True, transform=VAL_TRANSFORM)
     
-    # 2. Extract Top-K Confident Images from the 100k Unlabeled Pool
-    if teacher is not None and device is not None:
-        print(f"\n[DATA] Sweeping 100k Unlabeled Dataset to find the Top {top_k:,} most mathematically confident images...")
-        clean_unlab_ds = STL10(root=data_root, split="unlabeled", download=True, transform=VAL_TRANSFORM)
-        eval_ld = DataLoader(clean_unlab_ds, batch_size=512, shuffle=False, num_workers=0, pin_memory=True)
-        
-        teacher.eval()
-        all_confs = []
-        with torch.no_grad():
-            for x, _ in eval_ld:
-                x = x.to(device)
-                probs = F.softmax(teacher(x), dim=1)
-                confs, _ = torch.max(probs, dim=1)
-                all_confs.append(confs.cpu())
-                
-        all_confs = torch.cat(all_confs)
-        
-        # Sort indices by highest confidence
-        top_indices = torch.argsort(all_confs, descending=True)[:top_k].tolist()
-        
-        # Reload the unlabeled set but explicitly map it to the heavy Training Augmentations
-        aug_unlab_ds = STL10(root=data_root, split="unlabeled", download=False, transform=TRAIN_TRANSFORM)
-        unlab_subset = Subset(aug_unlab_ds, top_indices)
-        
-        combined_ds = ConcatDataset([train_ds, unlab_subset])
-        print(f"[DATA] Teacher Confidence Sweep Complete!")
-        print(f"[DATA] Distillation Pipeline Locked: {len(train_ds):,} Labeled + {len(unlab_subset):,} Elite Unlabeled = {len(combined_ds):,} Total Images/Epoch.\n")
-    else:
-        combined_ds = train_ds
-        print(f"\n[DATA] Using ONLY {len(train_ds):,} Labeled images (No teacher provided).\n")
+    combined_ds = ConcatDataset([train_ds, unlab_ds])
+    print(f"\n[DATA] Restored Massive Distillation Pipeline: {len(train_ds):,} Labeled + {len(unlab_ds):,} Unlabeled = {len(combined_ds):,} Total Images/Epoch.\n")
     
-    # Strictly zero workers to prevent Kaggle IO/Memory Multiprocessing Deadlocks
+    # Strictly zero workers to permanently prevent Kaggle multiprocessing deadlocks
     train_ld = DataLoader(combined_ds, batch_size=batch_size, shuffle=True,
                           num_workers=0, pin_memory=True, worker_init_fn=seed_worker, generator=g)
     val_ld   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
