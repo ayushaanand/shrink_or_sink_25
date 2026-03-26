@@ -11,6 +11,8 @@ class DepthwiseSeparableConv(nn.Module):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=stride, padding=1, groups=in_ch, bias=False),
+            nn.BatchNorm2d(in_ch),
+            nn.ReLU(inplace=True),
             nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
