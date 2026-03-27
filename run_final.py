@@ -5,22 +5,24 @@ from train_recipe import get_loaders, train_student
 from torchvision import models
 import os
 
-def main():
+import argparse
+
+def main(args):
     print("="*65)
     print("🚀 INITIATING FINAL 25-EPOCH HACKATHON RUN")
     print("="*65)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    print("Loading Teacher...")
+    print(f"Loading Teacher from '{args.teacher}'...")
     teacher = models.resnet50(weights=None)
     teacher.fc = nn.Linear(teacher.fc.in_features, 10)
-    teacher.load_state_dict(torch.load("teacher_final3.pth", map_location=device))
+    teacher.load_state_dict(torch.load(args.teacher, map_location=device))
     if torch.cuda.device_count() > 1:
         teacher = nn.DataParallel(teacher)
     teacher = teacher.to(device).eval()
 
-    print("Loading Massive 105k Dataset...")
-    train_ld, val_ld = get_loaders("/kaggle/working/data", teacher=teacher, device=device, batch_size=128)
+    print(f"Loading Massive 105k Dataset from '{args.data}'...")
+    train_ld, val_ld = get_loaders(args.data, teacher=teacher, device=device, batch_size=128)
 
     cfg = [48, 96, 192, 384]
     cfg_d = [2, 3, 4, 2]
@@ -49,4 +51,8 @@ def main():
     print("="*65)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=str, default="/kaggle/working/data", help="Path to STL-10 dataset")
+    parser.add_argument("--teacher", type=str, default="teacher_final3.pth", help="Path to Teacher .pth")
+    args = parser.parse_args()
+    main(args)
