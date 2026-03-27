@@ -85,7 +85,7 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 128):
-    """Return (train_loader, val_loader) using a 35k Accelerated Distillation pool (30k Unlabeled + 5k Labeled)."""
+    """Return (train_loader, val_loader) using the massive 105k Distillation pool with safe Kaggle workers."""
     set_seed(42)
     g = torch.Generator()
     g.manual_seed(42)
@@ -94,12 +94,8 @@ def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 128
     unlab_ds = STL10(root=data_root, split="unlabeled", download=True, transform=TRAIN_TRANSFORM)
     val_ds   = STL10(root=data_root, split="test",  download=True, transform=VAL_TRANSFORM)
     
-    # Strictly bind the Unlabeled set to exactly 30,000 randomly permuted images
-    indices = torch.randperm(len(unlab_ds), generator=g)[:30000].tolist()
-    unlab_subset = Subset(unlab_ds, indices)
-    
-    combined_ds = ConcatDataset([train_ds, unlab_subset])
-    print(f"\n[DATA] 35k Accelerated Distillation Pipeline: {len(train_ds):,} Labeled + {len(unlab_subset):,} Random Unlabeled = {len(combined_ds):,} Total Images/Epoch.\n")
+    combined_ds = ConcatDataset([train_ds, unlab_ds])
+    print(f"\n[DATA] Restored Massive Distillation Pipeline: {len(train_ds):,} Labeled + {len(unlab_ds):,} Unlabeled = {len(combined_ds):,} Total Images/Epoch.\n")
     
     # Strictly zero workers to permanently prevent Kaggle multiprocessing deadlocks
     train_ld = DataLoader(combined_ds, batch_size=batch_size, shuffle=True,

@@ -136,13 +136,21 @@ else:
     if torch.cuda.device_count() > 1:
         _hi_student = nn.DataParallel(_hi_student)
 
+    w_str_hi = "-".join(map(str, args.hi))
+    d_str_hi = "-".join(map(str, args.hi_depth))
+    hi_ckpt_name = f"latest_student_w{w_str_hi}_d{d_str_hi}.pth"
+
     # Step 1 & 2 Integrated Calibration:
     _, _hi_curve = train_student(
         _hi_student, teacher, train_ld, val_ld,
         epochs=args.full_epochs, device=device, lr=args.lr, verbose=True,
+        ckpt_path=hi_ckpt_name
     )
     hi_proxy_acc = _hi_curve[args.proxy_epochs - 1]
     _hi_acc = _hi_curve[-1]
+    
+    if os.path.exists(hi_ckpt_name):
+        os.rename(hi_ckpt_name, f"student_w{w_str_hi}_d{d_str_hi}_acc{_hi_acc:.4f}.pth")
     
     dynamic_proxy_thresh = round(hi_proxy_acc * args.proxy_ratio, 4)
     print(f"  hi proxy acc  @ epoch {args.proxy_epochs}: {hi_proxy_acc:.4f}")
