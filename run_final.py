@@ -24,8 +24,8 @@ def main(args):
     print(f"Loading Massive 105k Dataset from '{args.data}'...")
     train_ld, val_ld = get_loaders(args.data, teacher=teacher, device=device, batch_size=128)
 
-    cfg = [48, 96, 192, 384]
-    cfg_d = [2, 3, 4, 2]
+    cfg = [16, 32, 64, 128]
+    cfg_d = [1, 1, 1, 1]
     print(f"Initializing Final Architecture: Width={cfg} Depth={cfg_d}")
     student = DynamicNet(cfg, cfg_d)
     
@@ -37,11 +37,11 @@ def main(args):
         student = nn.DataParallel(student)
     student = student.to(device)
 
-    print("\nStarting 25 Epoch Distillation...")
-    ckpt_name = f"final_winner_w48-96-192-384_d2-3-4-2.pth"
+    print("\nStarting 15 Epoch Emergency Burn...")
+    ckpt_name = f"final_winner_w16-32-64-128_d1-1-1-1.pth"
     acc, curve = train_student(
         student, teacher, train_ld, val_ld,
-        epochs=25, device=device, lr=1e-3, verbose=True,
+        epochs=15, device=device, lr=1e-3, verbose=True,
         ckpt_path=ckpt_name
     )
     

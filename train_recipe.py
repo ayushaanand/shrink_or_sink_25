@@ -99,9 +99,9 @@ def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 128
     
     # Strictly zero workers to permanently prevent Kaggle multiprocessing deadlocks
     train_ld = DataLoader(combined_ds, batch_size=batch_size, shuffle=True,
-                          num_workers=0, pin_memory=True, worker_init_fn=seed_worker, generator=g)
+                          num_workers=0, pin_memory=False, worker_init_fn=seed_worker, generator=g)
     val_ld   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                          num_workers=0, pin_memory=True)
+                          num_workers=0, pin_memory=False)
     return train_ld, val_ld
 
 
