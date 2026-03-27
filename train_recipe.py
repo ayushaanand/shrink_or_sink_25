@@ -21,6 +21,37 @@ import numpy as np
 from torchvision.datasets import STL10
 from torch.utils.data import DataLoader, ConcatDataset, Subset
 import time
+import tqdm
+import torchvision.datasets.utils as tv_utils
+
+# ── 🚨 Hotfix: Suppress Rapid TQDM Output for Kaggle Disconnects ──────────────
+class MinimalTqdm:
+    def __init__(self, *args, **kwargs):
+        self.iterable = args[0] if args else kwargs.get('iterable')
+        self.total = kwargs.get('total')
+        self.n = 0
+        self.last_pct = -1
+    def __iter__(self):
+        if self.iterable is not None:
+            for obj in self.iterable:
+                yield obj
+                self.update(1)
+    def update(self, n=1):
+        self.n += n
+        if self.total:
+            pct = int((self.n / self.total) * 10) * 10
+            if pct > self.last_pct:
+                print(f"  [STL-10 Download] {pct}% Complete...")
+                self.last_pct = pct
+    def set_postfix(self, **kwargs): pass
+    def close(self): pass
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+
+# Physically override PyTorch's native tqdm fetcher globally
+tv_utils.tqdm = MinimalTqdm
+tqdm.tqdm = MinimalTqdm
+# ──────────────────────────────────────────────────────────────────────────────
 
 # ── Normalisation stats for STL-10 ────────────────────────────────────────────
 STL10_MEAN = [0.4467, 0.4398, 0.4066]
@@ -54,7 +85,7 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 128):
-    """Return (train_loader, val_loader) using the massive 105k Distillation pool with safe Kaggle workers."""
+    """Return (train_loader, val_loader) using a 35k Accelerated Distillation pool (30k Unlabeled + 5k Labeled)."""
     set_seed(42)
     g = torch.Generator()
     g.manual_seed(42)
@@ -63,8 +94,12 @@ def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 128
     unlab_ds = STL10(root=data_root, split="unlabeled", download=True, transform=TRAIN_TRANSFORM)
     val_ds   = STL10(root=data_root, split="test",  download=True, transform=VAL_TRANSFORM)
     
-    combined_ds = ConcatDataset([train_ds, unlab_ds])
-    print(f"\n[DATA] Restored Massive Distillation Pipeline: {len(train_ds):,} Labeled + {len(unlab_ds):,} Unlabeled = {len(combined_ds):,} Total Images/Epoch.\n")
+    # Strictly bind the Unlabeled set to exactly 30,000 randomly permuted images
+    indices = torch.randperm(len(unlab_ds), generator=g)[:30000].tolist()
+    unlab_subset = Subset(unlab_ds, indices)
+    
+    combined_ds = ConcatDataset([train_ds, unlab_subset])
+    print(f"\n[DATA] 35k Accelerated Distillation Pipeline: {len(train_ds):,} Labeled + {len(unlab_subset):,} Random Unlabeled = {len(combined_ds):,} Total Images/Epoch.\n")
     
     # Strictly zero workers to permanently prevent Kaggle multiprocessing deadlocks
     train_ld = DataLoader(combined_ds, batch_size=batch_size, shuffle=True,
@@ -144,13 +179,12 @@ def evaluate(student, loader, device) -> float:
 def train_student(student, teacher, train_loader, val_loader,
                   epochs: int, device,
                   lr: float = 1e-3, weight_decay: float = 1e-4,
-                  verbose: bool = True) -> tuple[float, list[float]]:
+                  verbose: bool = True,
+                  proxy_epochs: int = None, proxy_thresh: float = None,
+                  ckpt_path: str = None) -> tuple[float, list[float]]:
     """
-    Full training loop for a student model under KD.
-
-    Returns:
-        final_acc: validation accuracy at the final epoch
-        acc_curve: list of per-epoch val accuracies
+    Full integrated training loop for a student model under KD.
+    Supports in-line proxy checking and per-epoch check-pointing to survive Kaggle crashes.
     """
     optimizer = torch.optim.AdamW(student.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -173,5 +207,18 @@ def train_student(student, teacher, train_loader, val_loader,
         epoch_time = time.time() - start_time
         if verbose:
             print(f"  Epoch {epoch:>3}/{epochs}  loss={loss:.4f}  val={acc:.4f}  ({epoch_time:.1f}s)")
+            
+        if ckpt_path:
+            # Overwrite strictly the single latest checkpoint (saving disk space/FP16)
+            raw_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
+            fp16_state = {k: v.cpu().clone().half() for k, v in raw_state.items()}
+            torch.save(fp16_state, ckpt_path)
+
+        if proxy_epochs is not None and proxy_thresh is not None:
+            if epoch == proxy_epochs:
+                if acc < proxy_thresh:
+                    if verbose:
+                        print(f"  ✗ Proxy threshold failed: {acc:.4f} < {proxy_thresh:.4f}. Ejecting early!")
+                    return acc, acc_curve
 
     return acc_curve[-1], acc_curve

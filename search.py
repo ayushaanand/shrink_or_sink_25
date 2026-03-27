@@ -136,23 +136,20 @@ else:
     if torch.cuda.device_count() > 1:
         _hi_student = nn.DataParallel(_hi_student)
 
-    # Step 1: proxy run — VERBOSE enabled as requested by user!
-    _, _hi_proxy_curve = train_student(
+    # Step 1 & 2 Integrated Calibration:
+    _, _hi_curve = train_student(
         _hi_student, teacher, train_ld, val_ld,
-        epochs=args.proxy_epochs, device=device, lr=args.lr, verbose=True,
+        epochs=args.full_epochs, device=device, lr=args.lr, verbose=True,
     )
-    hi_proxy_acc = _hi_proxy_curve[-1]
+    hi_proxy_acc = _hi_curve[args.proxy_epochs - 1]
+    _hi_acc = _hi_curve[-1]
+    
     dynamic_proxy_thresh = round(hi_proxy_acc * args.proxy_ratio, 4)
     print(f"  hi proxy acc  @ epoch {args.proxy_epochs}: {hi_proxy_acc:.4f}")
     print(f"  → dynamic_proxy_thresh = {dynamic_proxy_thresh:.4f}  "
           f"({dynamic_proxy_thresh*100:.2f}% required at epoch {args.proxy_epochs} to proceed)\n")
-
-    # Step 2: continue hi training to full_epochs to confirm hitting target
-    _hi_acc, _ = train_student(
-        _hi_student, teacher, train_ld, val_ld,
-        epochs=args.full_epochs - args.proxy_epochs, device=device, lr=args.lr, verbose=True,
-    )
     print(f"  hi full acc   @ epoch {args.full_epochs}: {_hi_acc:.4f} ({_hi_acc*100:.2f}%)")
+    
     if _hi_acc < args.target_acc:
         raise ValueError(
             f"\n🚨 ABORT: Upper bound hi_w={args.hi} hi_d={args.hi_depth} only reached {_hi_acc*100:.2f}% "
@@ -214,14 +211,19 @@ while not check_convergence(lo, hi, lo_d, hi_d):
     if torch.cuda.device_count() > 1:
         student = nn.DataParallel(student)
 
-    # ── Phase 1: Proxy training ────────────────────────────────────────────
-    print(f"  Phase 1: Proxy ({args.proxy_epochs} epochs)...")
+    # ── Phase 1 & 2: Integrated Training ───────────────────────────────────────
+    w_str = "-".join(map(str, cfg))
+    d_str = "-".join(map(str, cfg_d))
+    ckpt_name = f"latest_student_w{w_str}_d{d_str}.pth"
+    print(f"  [START] Running integrated loop (Proxy @ {args.proxy_epochs}, Full @ {args.full_epochs})...")
+
+    # Seamlessly execute the entire training span without throwing away early epoch momentum
     _, acc_curve = train_student(
         student, teacher, train_ld, val_ld,
-        epochs=args.proxy_epochs, device=device, lr=args.lr, verbose=True,
+        epochs=args.full_epochs, device=device, lr=args.lr, verbose=True,
+        proxy_epochs=args.proxy_epochs, proxy_thresh=dynamic_proxy_thresh,
+        ckpt_path=ckpt_name
     )
-    proxy_acc = acc_curve[-1]
-    print(f"  Proxy best acc: {proxy_acc:.4f}")
 
     log_entry = {
         "iteration": iteration,
@@ -229,13 +231,15 @@ while not check_convergence(lo, hi, lo_d, hi_d):
         "config_d":  cfg_d,
         "params":    params,
         "mb_fp16":   round(mb, 4),
-        "proxy_acc": proxy_acc,
+        "proxy_acc": None,
         "full_acc":  None,
         "verdict":   None,
     }
 
-    if proxy_acc < dynamic_proxy_thresh:
-        print(f"  ✗ Proxy {proxy_acc:.4f} < {dynamic_proxy_thresh:.4f} → TOO SMALL → lo = current")
+    if len(acc_curve) <= args.proxy_epochs:
+        proxy_acc = acc_curve[-1]
+        log_entry["proxy_acc"] = proxy_acc
+        print(f"  ✗ Proxy {proxy_acc:.4f} < {dynamic_proxy_thresh:.4f} → TOO SMALL → lo = current\n")
         log_entry["verdict"] = "too_small_proxy"
         if cfg == lo and cfg_d == lo_d:
             # force bump if completely stuck
@@ -244,28 +248,15 @@ while not check_convergence(lo, hi, lo_d, hi_d):
         else:
             lo, lo_d = cfg, cfg_d
     else:
-        # ── Phase 2: Full training ─────────────────────────────────────────
-        print(f"  Phase 2: Full training ({args.full_epochs} epochs)...")
-        student = DynamicNet(cfg, cfg_d).to(device)   # fresh weights
-        if torch.cuda.device_count() > 1:
-            student = nn.DataParallel(student)
-            
-        full_acc, _ = train_student(
-            student, teacher, train_ld, val_ld,
-            epochs=args.full_epochs, device=device, lr=args.lr, verbose=True,
-        )
+        proxy_acc = acc_curve[args.proxy_epochs - 1]
+        full_acc = acc_curve[-1]
+        log_entry["proxy_acc"] = proxy_acc
         log_entry["full_acc"] = full_acc
         print(f"  Full best acc:  {full_acc:.4f}")
         
-        # Save this exact configuration regardless of whether it wins or loses
-        raw_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
-        w_str = "-".join(map(str, cfg))
-        d_str = "-".join(map(str, cfg_d))
-        ckpt_name = f"student_w{w_str}_d{d_str}_acc{full_acc:.4f}.pth"
-        _tmp = DynamicNet(cfg, cfg_d)
-        _tmp.load_state_dict({k: v.cpu().clone() for k, v in raw_state.items()})
-        torch.save(_tmp.half().state_dict(), ckpt_name)
-        print(f"  [SAVE] Intermediate sweep checkpoint secured: '{ckpt_name}'")
+        # Rename the single latest epoch checkpoint to the final accuracy-labeled file
+        if os.path.exists(ckpt_name):
+            os.rename(ckpt_name, f"student_w{w_str}_d{d_str}_acc{full_acc:.4f}.pth")
 
         if full_acc >= args.target_acc:
             print(f"  ✓ {full_acc:.4f} ≥ {args.target_acc} — SUFFICIENT → hi = current")
