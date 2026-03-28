@@ -38,6 +38,8 @@ parser.add_argument("--epoch-scale",     type=float, default=0.45,
                     help="Exponent: node_epochs = full_epochs * (hi_mb/cfg_mb)^epoch_scale")
 parser.add_argument("--size-tol-mb",     type=float, default=0.04,
                     help="Stop search when hi_mb - lo_mb falls below this (MB, FP16)")
+parser.add_argument("--min-mb",          type=float, default=0.01,
+                    help="Skip training entirely if cfg_mb < min_mb (capacity dead-end)")
 parser.add_argument("--target-acc",      type=float, default=0.85)
 parser.add_argument("--batch",           type=int,   default=512)
 parser.add_argument("--lr",              type=float, default=1e-3)
@@ -247,6 +249,20 @@ def main():
         print(f"  lo_w={lo}  hi_w={hi}  |  lo_d={lo_d}  hi_d={hi_d}")
         print(f"  Budget: {node_epochs} epochs  (proxy @ {proxy_ep})")
         print("─" * 65)
+
+        # ── Minimum size gate ─────────────────────────────────────────────────
+        if mb < args.min_mb:
+            print(f"  Skipped: {mb:.4f} MB < --min-mb {args.min_mb} MB — capacity dead-end.")
+            results_log.append({
+                "iteration": iteration, "config_w": cfg, "config_d": cfg_d,
+                "mb_fp16": round(mb, 4), "node_epochs": 0, "verdict": "below_min_mb"
+            })
+            if cfg == lo and cfg_d == lo_d:
+                lo   = [l + args.step if l < h else l for l, h in zip(lo, hi)]
+                lo_d = [ld + 1 if ld < hd else ld for ld, hd in zip(lo_d, hi_d)]
+            else:
+                lo, lo_d = list(cfg), list(cfg_d)
+            continue
 
         student = DynamicNet(cfg, cfg_d).to(device)
         if torch.cuda.device_count() > 1:
