@@ -65,9 +65,9 @@ def main():
     print(f"  hi = w:{args.hi} d:{args.hi_depth}  ({size_mb(DynamicNet(args.hi, args.hi_depth), 2):.4f} MB FP16)\n")
 
     # ── Resume Protocol / Preamble Check ──────────────────────────────────────────
-    ACTIVE_CKPT = "checkpoints/active_search_checkpoint.pth"
-    os.makedirs("checkpoints", exist_ok=True)
-    os.makedirs("pths", exist_ok=True)
+    ACTIVE_CKPT = os.path.join(os.getcwd(), "checkpoints", "active_search_checkpoint.pth")
+    os.makedirs(os.path.join(os.getcwd(), "checkpoints"), exist_ok=True)
+    os.makedirs(os.path.join(os.getcwd(), "pths"), exist_ok=True)
 
     resume_state = None
     iteration = 0
