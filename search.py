@@ -125,6 +125,7 @@ def main():
 
     teacher = load_teacher_safe(args.teacher, device)
     if torch.cuda.device_count() > 1:
+        print(f"🚀 Detected {torch.cuda.device_count()} GPUs! Enabling DataParallel for Teacher.")
         teacher = nn.DataParallel(teacher)
 
     # ── Data loaders ──────────────────────────────────────────────────────────────
@@ -210,6 +211,7 @@ def main():
 
         student = DynamicNet(cfg, cfg_d).to(device)
         if torch.cuda.device_count() > 1:
+            print(f"🚀 Enabling DataParallel for Student [w={cfg}, d={cfg_d}]")
             student = nn.DataParallel(student)
 
         # Pack exact state for robust recovery

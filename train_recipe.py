@@ -89,7 +89,9 @@ class RAMCachedSTL10(Dataset):
     """Stores 105k uint8 STL-10 JPEGs entirely in RAM (2.9 GB), bypassing physical hard drives."""
     def __init__(self, stl10_datasets, transform=None):
         self.transform = transform
-        self.data = np.concatenate([ds.data for ds in stl10_datasets], axis=0) # (N, 3, 96, 96)
+        # Pre-transpose to (N, H, W, C) so fromarray() is faster in the workers
+        raw_data = np.concatenate([ds.data for ds in stl10_datasets], axis=0) 
+        self.data = np.transpose(raw_data, (0, 2, 3, 1)) 
         self.labels = np.concatenate([ds.labels for ds in stl10_datasets], axis=0)
         
     def __len__(self):
@@ -99,8 +101,7 @@ class RAMCachedSTL10(Dataset):
         img = self.data[index]
         target = int(self.labels[index])
         
-        # Convert Torchvision STL10 format perfectly identically back to PIL Image
-        img = np.transpose(img, (1, 2, 0))
+        # Directly convert pre-transposed uint8 to PIL Image
         img = Image.fromarray(img)
         
         if self.transform is not None:
@@ -113,9 +114,14 @@ def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 256
     g = torch.Generator()
     g.manual_seed(42)
 
-    train_ds = STL10(root=data_root, split="train", download=True)
-    unlab_ds = STL10(root=data_root, split="unlabeled", download=True)
-    val_ds   = STL10(root=data_root, split="test",  download=True, transform=VAL_TRANSFORM)
+    # ── Safe Check for Kaggle Read-Only Cloud Filesystem ───────────────────────
+    download_flag = True
+    if "kaggle/input" in data_root.replace("\\", "/").lower():
+        download_flag = False
+
+    train_ds = STL10(root=data_root, split="train", download=download_flag)
+    unlab_ds = STL10(root=data_root, split="unlabeled", download=download_flag)
+    val_ds   = STL10(root=data_root, split="test",  download=download_flag, transform=VAL_TRANSFORM)
     
     print(f"\n[RAM CACHE] Loading {len(train_ds)+len(unlab_ds):,} JPEGs natively into physical UInt8 RAM (2.9 GB)...")
     combined_ds = RAMCachedSTL10([train_ds, unlab_ds], transform=TRAIN_TRANSFORM)
