@@ -231,6 +231,7 @@ def train_student(student, teacher, train_loader, val_loader,
                   lr: float = 1e-3, weight_decay: float = 1e-4,
                   verbose: bool = True,
                   proxy_epochs: int = None, proxy_thresh: float = None,
+                  total_epochs: int = None, target_acc: float = None,
                   ckpt_path: str = None,
                   resume_state: dict = None, active_ckpt_path: str = None,
                   cfg: list = None, cfg_d: list = None, search_state: dict = None) -> tuple[float, list[float]]:
@@ -240,9 +241,10 @@ def train_student(student, teacher, train_loader, val_loader,
     """
     optimizer = torch.optim.AdamW(student.parameters(), lr=lr, weight_decay=weight_decay)
 
-    # Cosine Annealing with Warm Restarts:
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=max(1, epochs // 3), T_mult=1
+    # Single cosine decay over the full training window — no restarts that could
+    # spike the LR on the final epoch.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=1e-6
     )
 
     acc_curve = []
@@ -285,11 +287,29 @@ def train_student(student, teacher, train_loader, val_loader,
             fp16_state = {k: v.cpu().clone().half() for k, v in raw_state.items()}
             torch.save(fp16_state, ckpt_path)
 
-        if proxy_epochs is not None and proxy_thresh is not None:
-            if epoch == proxy_epochs:
-                if acc < proxy_thresh:
+        if proxy_epochs is not None and epoch == proxy_epochs:
+            do_cut = False
+            if target_acc is not None and total_epochs is not None:
+                # Trajectory projection: linear extrapolation from slope at proxy
+                window = max(3, proxy_epochs // 5)
+                if len(acc_curve) > window:
+                    slope = (acc_curve[-1] - acc_curve[-window - 1]) / window
+                else:
+                    slope = 0.0
+                projected = acc_curve[-1] + slope * (total_epochs - proxy_epochs)
+                if projected < target_acc * 0.92:
                     if verbose:
-                        print(f"  ✗ Proxy threshold failed: {acc:.4f} < {proxy_thresh:.4f}. Ejecting early!")
-                    return acc, acc_curve
+                        print(f"  ✗ Trajectory cut: acc={acc_curve[-1]:.4f} "
+                              f"slope={slope:+.5f}/ep "
+                              f"projected@{total_epochs}={projected:.4f} "
+                              f"< {target_acc * 0.92:.4f}. Ejecting.")
+                    do_cut = True
+            elif proxy_thresh is not None and acc < proxy_thresh:
+                # Fallback flat threshold (backward compat)
+                if verbose:
+                    print(f"  ✗ Proxy threshold: {acc:.4f} < {proxy_thresh:.4f}. Ejecting.")
+                do_cut = True
+            if do_cut:
+                return acc, acc_curve
 
     return acc_curve[-1], acc_curve
