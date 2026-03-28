@@ -287,6 +287,15 @@ def train_student(student, teacher, train_loader, val_loader,
             fp16_state = {k: v.cpu().clone().half() for k, v in raw_state.items()}
             torch.save(fp16_state, ckpt_path)
 
+        # ── Early hopeless cut (epoch 10) ────────────────────────────────────
+        # A 10-class model should do better than near-random by epoch 10.
+        # 0.15 = 1.5× random chance — if it can't clear this, it never will.
+        if (epoch == 10 and target_acc is not None and
+                acc < 0.15 and proxy_epochs is not None):
+            if verbose:
+                print(f"  ✗ Hopeless cut @ epoch 10: val={acc:.4f} < 0.15 (near-random). Ejecting.")
+            return acc, acc_curve
+
         if proxy_epochs is not None and epoch == proxy_epochs:
             do_cut = False
             if target_acc is not None and total_epochs is not None:
