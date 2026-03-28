@@ -70,6 +70,7 @@ def main():
     os.makedirs(os.path.join(os.getcwd(), "pths"), exist_ok=True)
 
     resume_state = None
+    hi_resume_state = None
     iteration = 0
     results_log = []
     best_config = best_d_config = best_acc_config = best_acc_d_config = None
@@ -94,16 +95,24 @@ def main():
                 ss = {}
 
         if 'lo' in ss and resume_state is not None:
-            args.lo, args.hi = ss['lo'], ss['hi']
-            args.lo_depth, args.hi_depth = ss['lo_d'], ss['hi_d']
-            iteration = ss['iteration']
-            best_config, best_d_config, best_acc = ss['best_config'], ss['best_d_config'], ss['best_acc']
-            best_acc_config, best_acc_d_config = ss['best_acc_config'], ss['best_acc_d_config']
-            best_acc_val = ss['best_acc_val']
-            results_log = ss['results_log']
-            evaluated_lo = ss['evaluated_lo']
-            dynamic_proxy_thresh = ss['dynamic_proxy_thresh']
-            print(f"  [STRATEGY] Search State completely revived! Jumping cleanly into iteration {iteration}.")
+            if ss.get('phase') == 'hi_validation':
+                # Was interrupted mid hi-validation — resume it below
+                hi_resume_state = resume_state
+                _hi_resume_epoch = hi_resume_state.get('epoch', 0) + 1
+                resume_state = None  # Don't skip hi-validation block
+                dynamic_proxy_thresh = None
+                print(f"  [STRATEGY] Resuming HI-VALIDATION from epoch {_hi_resume_epoch}.")
+            else:
+                args.lo, args.hi = ss['lo'], ss['hi']
+                args.lo_depth, args.hi_depth = ss['lo_d'], ss['hi_d']
+                iteration = ss['iteration']
+                best_config, best_d_config, best_acc = ss['best_config'], ss['best_d_config'], ss['best_acc']
+                best_acc_config, best_acc_d_config = ss['best_acc_config'], ss['best_acc_d_config']
+                best_acc_val = ss['best_acc_val']
+                results_log = ss['results_log']
+                evaluated_lo = ss['evaluated_lo']
+                dynamic_proxy_thresh = ss['dynamic_proxy_thresh']
+                print(f"  [STRATEGY] Search State completely revived! Jumping cleanly into iteration {iteration}.")
         print("=" * 65 + "\n")
 
     # ── Load teacher securely ─────────────────────────────────────────────────────
@@ -159,11 +168,20 @@ def main():
 
             w_str_hi, d_str_hi = "-".join(map(str, args.hi)), "-".join(map(str, args.hi_depth))
             hi_ckpt_name = f"pths/student_w{w_str_hi}_d{d_str_hi}.pth"
+            hi_search_state = {
+                'phase': 'hi_validation',
+                'initial_lo': args.lo, 'initial_hi': args.hi,
+                'initial_lo_d': args.lo_depth, 'initial_hi_d': args.hi_depth,
+            }
 
             _, _hi_curve = train_student(
                 _hi_student, teacher, train_ld, val_ld,
                 epochs=args.full_epochs, device=device, lr=args.lr, verbose=True,
-                ckpt_path=hi_ckpt_name
+                ckpt_path=hi_ckpt_name,
+                active_ckpt_path=ACTIVE_CKPT,
+                cfg=args.hi, cfg_d=args.hi_depth,
+                search_state=hi_search_state,
+                resume_state=hi_resume_state
             )
             hi_proxy_acc = _hi_curve[args.proxy_epochs - 1]
             _hi_acc = _hi_curve[-1]
@@ -171,6 +189,9 @@ def main():
             if os.path.exists(hi_ckpt_name):
                 os.rename(hi_ckpt_name, f"pths/student_w{w_str_hi}_d{d_str_hi}_acc{_hi_acc:.4f}.pth")
             
+            if os.path.exists(ACTIVE_CKPT):
+                os.remove(ACTIVE_CKPT)
+
             dynamic_proxy_thresh = round(hi_proxy_acc * args.proxy_ratio, 4)
             print(f"  → dynamic_proxy_thresh = {dynamic_proxy_thresh:.4f}\n")
             
