@@ -19,10 +19,11 @@ import os
 import random
 import numpy as np
 from torchvision.datasets import STL10
-from torch.utils.data import DataLoader, ConcatDataset, Subset
+from torch.utils.data import DataLoader, ConcatDataset, Subset, Dataset
 import time
 import tqdm
 import torchvision.datasets.utils as tv_utils
+from PIL import Image
 
 # ── 🚨 Hotfix: Suppress Rapid TQDM Output for Kaggle Disconnects ──────────────
 class MinimalTqdm:
@@ -84,24 +85,47 @@ def seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 128):
+class RAMCachedSTL10(Dataset):
+    """Stores 105k uint8 STL-10 JPEGs entirely in RAM (2.9 GB), bypassing physical hard drives."""
+    def __init__(self, stl10_datasets, transform=None):
+        self.transform = transform
+        self.data = np.concatenate([ds.data for ds in stl10_datasets], axis=0) # (N, 3, 96, 96)
+        self.labels = np.concatenate([ds.labels for ds in stl10_datasets], axis=0)
+        
+    def __len__(self):
+        return len(self.data)
+        
+    def __getitem__(self, index):
+        img = self.data[index]
+        target = int(self.labels[index])
+        
+        # Convert Torchvision STL10 format perfectly identically back to PIL Image
+        img = np.transpose(img, (1, 2, 0))
+        img = Image.fromarray(img)
+        
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, target
+
+def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 256):
     """Return (train_loader, val_loader) using the massive 105k Distillation pool with safe Kaggle workers."""
     set_seed(42)
     g = torch.Generator()
     g.manual_seed(42)
 
-    train_ds = STL10(root=data_root, split="train", download=True, transform=TRAIN_TRANSFORM)
-    unlab_ds = STL10(root=data_root, split="unlabeled", download=True, transform=TRAIN_TRANSFORM)
+    train_ds = STL10(root=data_root, split="train", download=True)
+    unlab_ds = STL10(root=data_root, split="unlabeled", download=True)
     val_ds   = STL10(root=data_root, split="test",  download=True, transform=VAL_TRANSFORM)
     
-    combined_ds = ConcatDataset([train_ds, unlab_ds])
-    print(f"\n[DATA] Restored Massive Distillation Pipeline: {len(train_ds):,} Labeled + {len(unlab_ds):,} Unlabeled = {len(combined_ds):,} Total Images/Epoch.\n")
+    print(f"\n[RAM CACHE] Loading {len(train_ds)+len(unlab_ds):,} JPEGs natively into physical UInt8 RAM (2.9 GB)...")
+    combined_ds = RAMCachedSTL10([train_ds, unlab_ds], transform=TRAIN_TRANSFORM)
+    print(f"[DATA] Restored Massive Distillation Pipeline: Total {len(combined_ds):,} Images/Epoch.\n")
     
-    # Strictly zero workers to permanently prevent Kaggle multiprocessing deadlocks
+    # Unleashed Multiprocessing: 4 Workers + RAM Cache + No Pinning Deadlocks
     train_ld = DataLoader(combined_ds, batch_size=batch_size, shuffle=True,
-                          num_workers=0, pin_memory=False, worker_init_fn=seed_worker, generator=g)
+                          num_workers=4, pin_memory=False, worker_init_fn=seed_worker, generator=g)
     val_ld   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                          num_workers=0, pin_memory=False)
+                          num_workers=4, pin_memory=False)
     return train_ld, val_ld
 
 
@@ -177,7 +201,9 @@ def train_student(student, teacher, train_loader, val_loader,
                   lr: float = 1e-3, weight_decay: float = 1e-4,
                   verbose: bool = True,
                   proxy_epochs: int = None, proxy_thresh: float = None,
-                  ckpt_path: str = None) -> tuple[float, list[float]]:
+                  ckpt_path: str = None,
+                  resume_state: dict = None, active_ckpt_path: str = None,
+                  cfg: list = None, cfg_d: list = None, search_state: dict = None) -> tuple[float, list[float]]:
     """
     Full integrated training loop for a student model under KD.
     Supports in-line proxy checking and per-epoch check-pointing to survive Kaggle crashes.
@@ -185,15 +211,22 @@ def train_student(student, teacher, train_loader, val_loader,
     optimizer = torch.optim.AdamW(student.parameters(), lr=lr, weight_decay=weight_decay)
 
     # Cosine Annealing with Warm Restarts:
-    # T_0 = epochs // 3 cycles the LR ~3x over the full run, helping
-    # the model escape local minima repeatedly.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=max(1, epochs // 3), T_mult=1
     )
 
     acc_curve = []
+    start_epoch = 1
 
-    for epoch in range(1, epochs + 1):
+    if resume_state is not None:
+        optimizer.load_state_dict(resume_state['optimizer'])
+        scheduler.load_state_dict(resume_state['scheduler'])
+        acc_curve = resume_state['acc_curve']
+        start_epoch = resume_state['epoch'] + 1
+        if verbose:
+            print(f"  [RESUME] Flawlessly reviving Momentum Buffers & LR from Epoch {start_epoch}...")
+
+    for epoch in range(start_epoch, epochs + 1):
         start_time = time.time()
         loss = train_one_epoch(student, teacher, train_loader, optimizer, device)
         scheduler.step()
@@ -204,8 +237,20 @@ def train_student(student, teacher, train_loader, val_loader,
         if verbose:
             print(f"  Epoch {epoch:>3}/{epochs}  loss={loss:.4f}  val={acc:.4f}  ({epoch_time:.1f}s)")
             
+        if active_ckpt_path and cfg is not None and cfg_d is not None:
+            heavy_state = {
+                'epoch': epoch,
+                'model': student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict(),
+                'acc_curve': acc_curve,
+                'cfg': cfg,
+                'cfg_d': cfg_d,
+                'search_state': search_state
+            }
+            torch.save(heavy_state, active_ckpt_path)
+
         if ckpt_path:
-            # Overwrite strictly the single latest checkpoint (saving disk space/FP16)
             raw_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
             fp16_state = {k: v.cpu().clone().half() for k, v in raw_state.items()}
             torch.save(fp16_state, ckpt_path)
