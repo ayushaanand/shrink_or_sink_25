@@ -22,10 +22,10 @@ from train_recipe import get_loaders, train_student
 parser = argparse.ArgumentParser()
 parser.add_argument("--data",            type=str,   default="./data")
 parser.add_argument("--teacher",         type=str,   default="teacher.pth")
-parser.add_argument("--lo",              type=int,   nargs="+", default=[8, 16, 32])
-parser.add_argument("--hi",              type=int,   nargs="+", default=[64, 128, 256])
-parser.add_argument("--lo-depth",        type=int,   nargs="+", default=[1, 1, 1])
-parser.add_argument("--hi-depth",        type=int,   nargs="+", default=[3, 3, 3])
+parser.add_argument("--lo",              type=int,   nargs="+", default=[8, 16, 32, 64])
+parser.add_argument("--hi",              type=int,   nargs="+", default=[64, 128, 256, 512])
+parser.add_argument("--lo-depth",        type=int,   nargs="+", default=[1, 1, 1, 1])
+parser.add_argument("--hi-depth",        type=int,   nargs="+", default=[3, 3, 3, 3])
 parser.add_argument("--tol",             type=int,   default=2,
                     help="Channel-level fallback convergence tolerance")
 parser.add_argument("--step",            type=int,   default=2,

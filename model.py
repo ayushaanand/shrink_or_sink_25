@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 
 # [TEMPLATE] Set this to the winning configuration found by the Binary Architecture Search!
-WINNING_WIDTHS = [32, 64, 128]
-WINNING_DEPTHS = [2, 2, 2]
+WINNING_WIDTHS = [64, 128, 256, 512]
+WINNING_DEPTHS = [2, 2, 2, 2]
 
 class DepthwiseSeparableConv(nn.Module):
     """MobileNet/ResNet-style Depthwise Separable Block with Identity Skip."""
