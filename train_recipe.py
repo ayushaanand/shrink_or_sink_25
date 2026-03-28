@@ -86,30 +86,28 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 class RAMCachedSTL10(Dataset):
-    """Stores 105k uint8 STL-10 JPEGs entirely in RAM (2.9 GB), bypassing physical hard drives."""
-    def __init__(self, stl10_datasets, transform=None):
+    """Stores 105k uint8 STL-10 images in RAM + optional pre-computed teacher logits."""
+    def __init__(self, stl10_datasets, transform=None, teacher_logits=None):
         self.transform = transform
-        # Pre-transpose to (N, H, W, C) so fromarray() is faster in the workers
-        raw_data = np.concatenate([ds.data for ds in stl10_datasets], axis=0) 
-        self.data = np.transpose(raw_data, (0, 2, 3, 1)) 
+        raw_data = np.concatenate([ds.data for ds in stl10_datasets], axis=0)
+        self.data = np.transpose(raw_data, (0, 2, 3, 1))  # (N, H, W, C) pre-transposed
         self.labels = np.concatenate([ds.labels for ds in stl10_datasets], axis=0)
+        self.teacher_logits = teacher_logits  # (N, 10) FP16 tensor, or None
         
     def __len__(self):
         return len(self.data)
         
     def __getitem__(self, index):
-        img = self.data[index]
-        target = int(self.labels[index])
-        
-        # Directly convert pre-transposed uint8 to PIL Image
-        img = Image.fromarray(img)
-        
+        img = Image.fromarray(self.data[index])
         if self.transform is not None:
             img = self.transform(img)
+        target = int(self.labels[index])
+        if self.teacher_logits is not None:
+            return img, target, self.teacher_logits[index]
         return img, target
 
 def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 256):
-    """Return (train_loader, val_loader) using the massive 105k Distillation pool with safe Kaggle workers."""
+    """Return (train_loader, val_loader). Teacher logits are pre-computed once and cached in RAM."""
     set_seed(42)
     g = torch.Generator()
     g.manual_seed(42)
@@ -119,18 +117,41 @@ def get_loaders(data_root: str, teacher=None, device=None, batch_size: int = 256
     if "kaggle/input" in data_root.replace("\\", "/").lower():
         download_flag = False
 
-    train_ds = STL10(root=data_root, split="train", download=download_flag)
+    train_ds = STL10(root=data_root, split="train",     download=download_flag)
     unlab_ds = STL10(root=data_root, split="unlabeled", download=download_flag)
-    val_ds   = STL10(root=data_root, split="test",  download=download_flag, transform=VAL_TRANSFORM)
-    
-    print(f"\n[RAM CACHE] Loading {len(train_ds)+len(unlab_ds):,} JPEGs natively into physical UInt8 RAM (2.9 GB)...")
-    combined_ds = RAMCachedSTL10([train_ds, unlab_ds], transform=TRAIN_TRANSFORM)
-    print(f"[DATA] Restored Massive Distillation Pipeline: Total {len(combined_ds):,} Images/Epoch.\n")
-    
-    # Unleashed Multiprocessing: 4 Workers + RAM Cache + No Pinning Deadlocks
+    val_ds   = STL10(root=data_root, split="test",      download=download_flag, transform=VAL_TRANSFORM)
+
+    # ── Pre-compute teacher logits once for ALL 105k training images ────────────
+    teacher_logits = None
+    if teacher is not None and device is not None:
+        print(f"[LOGIT CACHE] Pre-computing teacher logits for {len(train_ds)+len(unlab_ds):,} images (runs once)...")
+
+        # Minimal no-augmentation dataset purely for inference
+        raw_chw = np.concatenate([train_ds.data, unlab_ds.data], axis=0)  # (N, 3, 96, 96) uint8
+        _norm = transforms.Compose([transforms.ToTensor(), transforms.Normalize(STL10_MEAN, STL10_STD)])
+
+        class _InferDs(Dataset):
+            def __init__(self, chw): self.d = np.transpose(chw, (0, 2, 3, 1))
+            def __len__(self): return len(self.d)
+            def __getitem__(self, i): return _norm(Image.fromarray(self.d[i]))
+
+        infer_ld = DataLoader(_InferDs(raw_chw), batch_size=512, shuffle=False,
+                              num_workers=4, pin_memory=False)
+        teacher.eval()
+        all_logits = []
+        with torch.no_grad():
+            for x in infer_ld:
+                all_logits.append(teacher(x.to(device)).cpu().half())
+        teacher_logits = torch.cat(all_logits, dim=0)  # (N, 10) FP16
+        print(f"[LOGIT CACHE] Done! {len(teacher_logits):,} logits cached ({teacher_logits.nbytes / 1e6:.1f} MB). Teacher will NOT run during training.\n")
+
+    print(f"[RAM CACHE] Loading {len(train_ds)+len(unlab_ds):,} images into RAM...")
+    combined_ds = RAMCachedSTL10([train_ds, unlab_ds], transform=TRAIN_TRANSFORM, teacher_logits=teacher_logits)
+    print(f"[DATA] {len(combined_ds):,} images/epoch ready.\n")
+
     train_ld = DataLoader(combined_ds, batch_size=batch_size, shuffle=True,
                           num_workers=4, pin_memory=False, worker_init_fn=seed_worker, generator=g)
-    val_ld   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+    val_ld   = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                           num_workers=4, pin_memory=False)
     return train_ld, val_ld
 
@@ -163,27 +184,29 @@ def kd_loss(student_logits, teacher_logits, hard_labels,
 # ── Core train / evaluate functions ───────────────────────────────────────────
 
 def train_one_epoch(student, teacher, loader, optimizer, device) -> float:
-    """Run one training epoch with KD. Returns mean loss."""
+    """Run one training epoch with KD. Uses pre-cached teacher logits if available."""
     student.train()
-    teacher.eval()
     total_loss = 0.0
 
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
+    for batch in loader:
+        if len(batch) == 3:
+            x, y, t_logits = batch
+            x, y = x.to(device), y.to(device)
+            t_logits = t_logits.to(device).float()
+        else:
+            x, y = batch
+            x, y = x.to(device), y.to(device)
+            teacher.eval()
+            with torch.no_grad():
+                t_logits = teacher(x)
+
         optimizer.zero_grad()
-
-        with torch.no_grad():
-            t_logits = teacher(x)
-
         s_logits = student(x)
-        
-        # Inject Knowledge Distillation pseudo-labels for the Unlabeled Dataset
         hard_labels = torch.where(y == -1, t_logits.argmax(dim=1), y)
         loss = kd_loss(s_logits, t_logits, hard_labels)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
         optimizer.step()
-
         total_loss += loss.item()
 
     return total_loss / len(loader)
