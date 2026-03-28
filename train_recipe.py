@@ -15,7 +15,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
-import torchvision.transforms.functional as TF
 import os
 import random
 import numpy as np
@@ -59,42 +58,19 @@ tqdm.tqdm = MinimalTqdm
 STL10_MEAN = [0.4467, 0.4398, 0.4066]
 STL10_STD  = [0.2603, 0.2566, 0.2713]
 
-# CPU workers: only cheap spatial transforms + ToTensor (no ColorJitter, no Normalize)
+# CPU workers: crop + flip + color jitter (no hue, too slow) + normalize
 TRAIN_TRANSFORM = transforms.Compose([
     transforms.RandomCrop(96, padding=12),
     transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),  # -> [0, 1] float tensor, Normalize done on GPU
+    transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
+    transforms.ToTensor(),
+    transforms.Normalize(STL10_MEAN, STL10_STD),
 ])
 
 VAL_TRANSFORM = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(STL10_MEAN, STL10_STD),
 ])
-
-# GPU-side augmentation constants
-_MEAN = torch.tensor(STL10_MEAN).view(1, 3, 1, 1)
-_STD  = torch.tensor(STL10_STD).view(1, 3, 1, 1)
-
-def _gpu_augment_normalize(x):
-    """Apply ColorJitter + Normalize to a [0,1] float batch tensor on GPU.
-    Using TF functional ops which are CUDA-compatible in torchvision >= 0.9.
-    """
-    brightness = random.uniform(0.6, 1.4)
-    contrast   = random.uniform(0.6, 1.4)
-    saturation = random.uniform(0.6, 1.4)
-    hue        = random.uniform(-0.1, 0.1)
-    ops = [0, 1, 2, 3]
-    random.shuffle(ops)
-    for op in ops:
-        if   op == 0: x = TF.adjust_brightness(x, brightness)
-        elif op == 1: x = TF.adjust_contrast(x, contrast)
-        elif op == 2: x = TF.adjust_saturation(x, saturation)
-        elif op == 3: x = TF.adjust_hue(x, hue)
-    x = x.clamp(0.0, 1.0)
-    # Normalize in-place on GPU
-    mean = _MEAN.to(x.device)
-    std  = _STD.to(x.device)
-    return (x - mean) / std
 
 
 def set_seed(seed=42):
@@ -217,12 +193,10 @@ def train_one_epoch(student, teacher, loader, optimizer, device) -> float:
         if len(batch) == 3:
             x, y, t_logits = batch
             x, y = x.to(device), y.to(device)
-            x = _gpu_augment_normalize(x)  # ColorJitter + Normalize on GPU
             t_logits = t_logits.to(device).float()
         else:
             x, y = batch
             x, y = x.to(device), y.to(device)
-            x = _gpu_augment_normalize(x)  # ColorJitter + Normalize on GPU
             teacher.eval()
             with torch.no_grad():
                 t_logits = teacher(x)
