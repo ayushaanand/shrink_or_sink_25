@@ -1,0 +1,18 @@
+Team Name: Ayush
+Bot Strategy Description: The MPS-Optimized MCTS Engine
+
+Instead of relying on rigid, pre-programmed heuristics that fail to adapt dynamically to emergent board states, our bot utilizes a Monte Carlo Tree Search (MCTS) algorithm tailored explicitly for combinatorial explosion mechanics under strict computational constraints (such as Apple Silicon MPS overhead loops). 
+
+1. Native-Python Architecture & Queue Physics
+Because the judging environment mandates a 1.0s timeout per computational cycle, loading tensor states into PyTorch or routing operations through external arrays creates massive PCIe interconnect latency traps. To bypass this, the entire 12x8 state is natively flattened into 1-Dimensional Python primitives (`own` and `orb` arrays).
+   
+The physics of the chain-reactions are simulated via a custom Breadth-First-Search integer queue, calculating exact cascading critical-mass detonations mathematically identically to the game's internal engine.
+
+2. Upper Confidence Bound 1 (UCB1) Selection
+The bot constructs an adaptive search tree on the fly. It traverses the node tree prioritizing mathematically un-explored branches weighed dynamically against nodes that consistently yield victory topologies, governed mathematically by UCB1 algorithms.
+
+3. Limited Rollouts 
+Once an unexplored configuration is locked, it plays out the game virtually into the future by aggressively applying simulated pseudo-random stochastic inputs for both players. To prevent MCTS from hanging eternally in theoretical infinite-explosion chain loops, it artificially caps the simulated rollout depth to exactly 8 turns, determining the winner via terminal territorial differential assessment if absolute assimilation hasn't occurred.
+
+4. 0.88s Micro-Timer Failsafe
+Because latency on laptops handling internal matrix physics can spike, the bot's internal `time.time()` tracker strictly interrupts the MCTS Expansion phase the exact millisecond the 0.88-second threshold is pierced, guaranteeing the response buffer is cleared safely before the 1.0s disqualifier is ever theoretically breached.

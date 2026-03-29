@@ -250,13 +250,18 @@ def train_student(student, teacher, train_loader, val_loader,
     acc_curve = []
     start_epoch = 1
 
-    if resume_state is not None:
+    if resume_state is not None and 'optimizer' in resume_state:
+        if isinstance(student, nn.DataParallel):
+            student.module.load_state_dict(resume_state['model'])
+        else:
+            student.load_state_dict(resume_state['model'])
+            
         optimizer.load_state_dict(resume_state['optimizer'])
         scheduler.load_state_dict(resume_state['scheduler'])
-        acc_curve = resume_state['acc_curve']
-        start_epoch = resume_state['epoch'] + 1
+        acc_curve = resume_state.get('acc_curve', [])
+        start_epoch = resume_state.get('epoch', 0) + 1
         if verbose:
-            print(f"  [RESUME] Flawlessly reviving Momentum Buffers & LR from Epoch {start_epoch}...")
+            print(f"  [RESUME] Flawlessly reviving Model Weights, Buffers & LR from Epoch {start_epoch}...")
 
     for epoch in range(start_epoch, epochs + 1):
         start_time = time.time()
