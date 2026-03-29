@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-# [TEMPLATE] Set this to the winning configuration found by the Binary Architecture Search!
-WINNING_WIDTHS = [64, 128, 256, 512]
+# Final Handcrafted Configuration natively scaling against STL-10 feature map manifolds
+WINNING_WIDTHS = [32, 64, 128, 256]
 WINNING_DEPTHS = [2, 2, 2, 2]
 
 class DepthwiseSeparableConv(nn.Module):

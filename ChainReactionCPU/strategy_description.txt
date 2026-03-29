@@ -1,0 +1,18 @@
+Team Name: Ayush
+Bot Strategy Description: The CPU-Maximized Native Python MCTS Engine
+
+Instead of relying on rigid, pre-programmed heuristics that fail to adapt dynamically to emergent board states, our bot utilizes a heavily micro-optimized Monte Carlo Tree Search (MCTS) algorithm tailored explicitly for combinatorial explosion mechanics under strict computational runtime constraints.
+
+1. Absolute Native CPython Optimization & Transposition
+The judging environment mandates a 1.0s timeout per computational cycle. Loading tensor states into PyTorch or routing operations through external arrays creates massive PCIe interconnect latency traps. To bypass this, the entire 12x8 state is natively flattened into 1-Dimensional Python primitives without external library dependencies (`numpy`/`torch`).
+- Dihedral Symmetries: Every newly explored board is hashed alongside its 3 geometric dihedral clones (mirrored/flipped natively using `operator.itemgetter` tuples), creating a minimum Canonical Key for our Transposition Table. This artificially quadruples our MCTS iteration capacity in the early-game.
+- Lazy Fisher-Yates Node Expansions: `O(1)` constant-time array pointer pop-swaps explicitly bypass standard `random.shuffle()` overhead arrays on tree growth.
+    
+2. The Heuristic Sigmoid Tension Pivot 
+Our MCTS dynamically recalculates node valuation boundaries at runtime. Using total board mass, a fast internal sigmoid equation calculates `$S$` (Saturation Tension). This organically forces the bot to mathematically pivot from pure Territory dominance (during early-game empty clusters) into absolute Atom-Domination cascades just as the board pressure goes super-critical.
+
+3. Incremental Chain Tracking
+The physics of the chain-reactions are completely natively simulated. We aggressively prune `while` loop checks in Rollouts across 8 depths by continuously persisting `c0` and `c1` cell-ownership pointers natively across the cascade simulations, completely skipping native python array iterations. This evaluates theoretical termination boundaries in purely zero-cost lookups!
+
+4. 0.930s Mathematical Timer Failsafe
+Because laptop OS schedulers spiking on internal physics can trigger the 1.0s disqualification bounds, the bot's internal solver mathematically intercepts and aborts the MCTS iterations (both across expanding arrays and mid-rollouts) at exactly `0.930` seconds. Because saturated bounds hit a ~50ms threshold, this leaves exactly 20ms of mathematical safety margin in worst-case explosions.

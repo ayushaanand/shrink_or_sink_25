@@ -82,18 +82,6 @@ class MCTSNode:
         self.untried_moves = moves
 
 def simulate_cascade(own, orb, move_i, player_id):
-    c0, c1 = 0, 0
-    for o in own:
-        if o == 0: c0 += 1
-        elif o == 1: c1 += 1
-        
-    old_owner = own[move_i]
-    if old_owner != player_id:
-        if old_owner == 0: c0 -= 1
-        elif old_owner == 1: c1 -= 1
-        if player_id == 0: c0 += 1
-        elif player_id == 1: c1 += 1
-        
     own[move_i] = player_id
     orb[move_i] += 1
     
@@ -104,6 +92,7 @@ def simulate_cascade(own, orb, move_i, player_id):
     q_head = 0
     
     while q_head < len(queue):
+        if q_head % 10000 == 0: print('q_head', q_head, 'len', len(queue))
         curr = queue[q_head]
         q_head += 1
         
@@ -115,27 +104,18 @@ def simulate_cascade(own, orb, move_i, player_id):
             orb[curr] = c_orb - c_crit
             if orb[curr] == 0:
                 own[curr] = -1
-                if c_owner == 0: c0 -= 1
-                elif c_owner == 1: c1 -= 1
                 
             for adj in ADJ[curr]:
-                adj_owner = own[adj]
-                if adj_owner != c_owner:
-                    if adj_owner == 0: c0 -= 1
-                    elif adj_owner == 1: c1 -= 1
-                    if c_owner == 0: c0 += 1
-                    elif c_owner == 1: c1 += 1
-                    own[adj] = c_owner
-                    
+                own[adj] = c_owner
                 orb[adj] += 1
                 if orb[adj] == CRITICAL[adj]: 
                     queue.append(adj)
                     
-            if orb[curr] >= c_crit:
-                queue.append(curr)
-                
-        if c0 == 0 and c1 > 1: return 1
-        if c1 == 0 and c0 > 1: return 0
+    c0 = 0
+    c1 = 0
+    for o in own:
+        if o == 0: c0 += 1
+        elif o == 1: c1 += 1
         
     if c0 == 0 and c1 > 1: return 1
     if c1 == 0 and c0 > 1: return 0
@@ -166,21 +146,8 @@ def get_move(state, player_id):
     global_TT = {}
     root = MCTSNode(None, None, own, orb, player_id, global_TT)
     
-    # Pre-compute Sigmoid weight W once from true root board state
-    # S = board saturation index (0=empty, 1=full). Drives early(cluster) vs late(spread) pivot.
-    _S = total_raw_mass / 248.0
-    _exp = -15.0 * (_S - 0.55)
-    if _exp > 50:   _W = 0.0
-    elif _exp < -50: _W = 1.0
-    else:            _W = 1.0 / (1.0 + math.exp(_exp))
-
-    # Time budget: push as close to 1.000s as safely possible.
-    # Worst-case overhead after loop exit: < 1ms (just a max() over root.children).
-    # Worst-case single simulate_cascade: < 5ms (post early-exit fix).
-    # Gate: don't START expansion if we have < 6ms left (BUDGET - 0.006).
-    BUDGET = 0.993
-
-    while time.time() - start_time < BUDGET:
+    while time.time() - start_time < 0.985:
+        print('Entering Outer MCTS Loop')
         node = root
         
         # 1. SELECTION 
@@ -204,9 +171,8 @@ def get_move(state, player_id):
                     
             node = random.choice(best_candidates)
             
-        # 2. EXPANSION
-        # Gate: only expand if we have enough time left for the cascade + at least one rollout step.
-        if node.untried_moves and (time.time() - start_time < BUDGET - 0.006):
+        # 2. EXPANSION 
+        if node.untried_moves:
             m = node.untried_moves.pop()
             new_own = list(node.owner)
             new_orb = list(node.orbs)
@@ -223,17 +189,15 @@ def get_move(state, player_id):
         
         if winner is None:
             for _ in range(8):
-                # Micro-timer: break before starting a cascade that might overrun
-                if time.time() - start_time > BUDGET - 0.004: break
+                print('Entering Rollout')
+                # Micro-timer explicit failsafe (Break mid-rollout without corrupting physics)
+                if time.time() - start_time > 0.985: break
                 
                 vm = [i for i in range(N) if sim_own[i] == sim_player or sim_own[i] == -1]
                 if not vm:
                     winner = 1 - sim_player
                     break
-                # Biased rollout: prefer cells closest to critical mass (most explosive pressure)
-                max_orb = max(sim_orb[i] for i in vm)
-                hot_moves = [i for i in vm if sim_orb[i] == max_orb]
-                rm = random.choice(hot_moves)
+                rm = random.choice(vm)
                 winner = simulate_cascade(sim_own, sim_orb, rm, sim_player)
                 if winner is not None:
                     break
@@ -259,7 +223,17 @@ def get_move(state, player_id):
             H_cluster = 1.0 if my_mass > opp_mass else (0.5 if my_mass == opp_mass else 0.0)
             H_spread  = 1.0 if my_cells > opp_cells else (0.5 if my_cells == opp_cells else 0.0)
             
-            vic_score = (1.0 - _W) * H_cluster + _W * H_spread
+            S = total_mass / 248.0
+            
+            exponent = -15.0 * (S - 0.55)
+            if exponent > 50:
+                W = 0.0
+            elif exponent < -50:
+                W = 1.0
+            else:
+                W = 1.0 / (1.0 + math.exp(exponent))
+                
+            vic_score = (1.0 - W) * H_cluster + W * H_spread
         else:
             vic_score = 1.0 if winner == player_id else 0.0
             
