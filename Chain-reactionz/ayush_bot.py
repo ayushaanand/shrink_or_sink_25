@@ -2,6 +2,7 @@ import math
 import time
 import random
 import operator
+import gc
 
 COLS = 8
 ROWS = 12
@@ -37,7 +38,17 @@ for r in range(ROWS):
         # 180 Rotation: Invert row and column
         ROT_180[i] = (ROWS - 1 - r) * COLS + (COLS - 1 - c)
 
-# Precompute index arrays for true C-tuple itemgetter mappings
+# ── Positional heatmap ──────────────────────────────────────────────────────
+# POS_VAL[i] = 1 / (1 + dist_to_nearest_row_edge + dist_to_nearest_col_edge)
+# Peaks at 1.0 on corners, decays smoothly toward 0.11 at board centre.
+# Precomputed once — O(1) lookup during hot MCTS path.
+POS_VAL = [0.0] * N
+for _r in range(ROWS):
+    for _c in range(COLS):
+        _dr = min(_r, ROWS - 1 - _r)   # 0 at top/bottom rows, grows inward
+        _dc = min(_c, COLS - 1 - _c)   # 0 at left/right cols, grows inward
+        POS_VAL[_r * COLS + _c] = 1.0 / (1.0 + _dr + _dc)
+
 IDX_H = [FLIP_H[i] for i in range(N)] + [FLIP_H[i] + N for i in range(N)]
 IDX_V = [FLIP_V[i] for i in range(N)] + [FLIP_V[i] + N for i in range(N)]
 IDX_180 = [ROT_180[i] for i in range(N)] + [ROT_180[i] + N for i in range(N)]
@@ -61,9 +72,9 @@ def get_canonical_hash(own, orb):
 
 
 class MCTSNode:
-    __slots__ = ('move', 'parent', 'owner', 'orbs', 'player_id', 'stats', 'untried_moves', 'children')
+    __slots__ = ('move', 'parent', 'owner', 'orbs', 'player_id', 'stats', 'untried_moves', 'children', 'c0', 'c1')
     
-    def __init__(self, move, parent, owner, orbs, player_id, global_TT):
+    def __init__(self, move, parent, owner, orbs, player_id, global_TT, c0, c1):
         self.move = move
         self.parent = parent
         self.owner = owner
@@ -78,8 +89,40 @@ class MCTSNode:
             global_TT[canonical_state] = [0.0, 0] # [Wins, Visits] Shared Memory Core Pointer
         self.stats = global_TT[canonical_state]
         
-        # Valid physical moves for expansion
-        self.untried_moves = [i for i in range(N) if owner[i] == player_id or owner[i] == -1]
+        # Store cell counts directly — eliminates O(N) scan at every expansion
+        self.c0 = c0
+        self.c1 = c1
+        
+        # ── Candidate Move Pruning ──────────────────────────────────────────────
+        # Score every valid move by strategic relevance.
+        # Capping at top-15 collapses branching factor from ~63 → 15, unlocking
+        # 3-4 ply search with the same iteration budget vs 1 ply before.
+        opp_id = 1 - player_id
+        all_moves = []
+        for i in range(N):
+            if owner[i] != player_id and owner[i] != -1:
+                continue  # opponent's cell, skip
+            adj_opp = sum(1 for a in ADJ[i] if owner[a] == opp_id)
+            adj_all = len(ADJ[i])
+            # Exclude completely trapped cells: exploding hands orbs to all opponents
+            if adj_opp == adj_all:
+                continue
+            # ── Strategic Score: Territory > Mass in opening
+            # 1. POS_VAL: Corner/Edge heatmap (1.0 -> 0.11)
+            # 2. (owner == -1): Massive boost (+1.5) to spread and take new territory
+            # 3. Near-criticality: (+orbs/crit) for immediate tactical pressure
+            # 4. Encirclement: (+0.8 * adj_opp) to respond to enemy build-ups
+            is_empty = (owner[i] == -1)
+            score = POS_VAL[i] + (1.5 if is_empty else 0.0) + (orbs[i] / CRITICAL[i]) + 0.8 * adj_opp
+            all_moves.append((score, i))
+        
+        if not all_moves:
+            # Last resort: allow any own/empty move to avoid getting stuck
+            all_moves = [(0.0, i) for i in range(N) if owner[i] == player_id or owner[i] == -1]
+        
+        all_moves.sort(reverse=True)
+        # Keep top-15; Fisher-Yates below handles random sampling order
+        self.untried_moves = [i for _, i in all_moves[:15]]
 
 def simulate_cascade(own, orb, move_i, player_id, c0, c1):
     old_owner = own[move_i]
@@ -138,6 +181,14 @@ def simulate_cascade(own, orb, move_i, player_id, c0, c1):
 
 def get_move(state, player_id):
     start_time = time.time()
+    gc.disable()  # Prevent cyclic GC pauses from firing mid-MCTS
+    try:
+        return _mcts(state, player_id, start_time)
+    finally:
+        gc.enable()
+        gc.collect()  # Clean up MCTSNode cycles after safely returning
+
+def _mcts(state, player_id, start_time):
     
     own = [-1] * N
     orb = [0] * N
@@ -152,24 +203,33 @@ def get_move(state, player_id):
                 orb[i] = orbs
                 total_raw_mass += orbs
                 
-    if total_raw_mass <= 2:
-        corners = [0, COLS-1, (ROWS-1)*COLS, (ROWS-1)*COLS + COLS-1]
-        for c_idx in corners:
-            if own[c_idx] == -1 or own[c_idx] == player_id:
-                return (c_idx // COLS, c_idx % COLS)
+    # Opening: grab any available corner immediately before running MCTS.
+    # Corners need only 2 orbs to explode — the highest-leverage opening plays.
+    CORNERS = [0, COLS-1, (ROWS-1)*COLS, (ROWS-1)*COLS + COLS-1]
+    # Early Game Book: Claim all corners and edges before starting expensive MCTS.
+    # We now strictly check for UNOWNED cells to prevent clustering in Turn 1 corner.
+    if total_raw_mass <= 12:
+        # First priority: Empty corners
+        for c_idx in CORNERS:
+            if own[c_idx] == -1: return (c_idx // COLS, c_idx % COLS)
+        # Second priority: Empty edges (adjacent to corners)
+        EDGES = [1, COLS-2, (ROWS-2)*COLS, (ROWS-1)*COLS+1, (ROWS-1)*COLS+COLS-2]
+        for e_idx in EDGES:
+            if e_idx < N and own[e_idx] == -1: return (e_idx // COLS, e_idx % COLS)
                 
     global_TT = {}
-    root = MCTSNode(None, None, own, orb, player_id, global_TT)
     
-    # Pre-compute Sigmoid weight W once from true root board state
-    # S = board saturation index (0=empty, 1=full). Drives early(cluster) vs late(spread) pivot.
-    _S = total_raw_mass / 248.0
-    _exp = -15.0 * (_S - 0.55)
-    if _exp > 50:   _W = 0.0
-    elif _exp < -50: _W = 1.0
-    else:            _W = 1.0 / (1.0 + math.exp(_exp))
+    # Compute c0/c1 once at root — all child nodes inherit from simulate_cascade return
+    root_c0, root_c1 = 0, 0
+    for o in own:
+        if o == 0: root_c0 += 1
+        elif o == 1: root_c1 += 1
+        
+    root = MCTSNode(None, None, own, orb, player_id, global_TT, root_c0, root_c1)
+    
+    # No sigmoid — it promoted clustering in early game (wrong direction).
 
-    while time.time() - start_time < 0.930:
+    while time.time() - start_time < 0.800:
         node = root
         
         # 1. SELECTION 
@@ -204,14 +264,9 @@ def get_move(state, player_id):
             new_own = list(node.owner)
             new_orb = list(node.orbs)
             
-            # Recalculate c0, c1 precisely at branch point
-            e_c0, e_c1 = 0, 0
-            for o in new_own:
-                if o == 0: e_c0 += 1
-                elif o == 1: e_c1 += 1
-                
-            winner, _, _ = simulate_cascade(new_own, new_orb, m, node.player_id, e_c0, e_c1)
-            node = MCTSNode(m, node, new_own, new_orb, 1 - node.player_id, global_TT)
+            # Pass parent's counts directly — no O(N) scan needed
+            winner, new_c0, new_c1 = simulate_cascade(new_own, new_orb, m, node.player_id, node.c0, node.c1)
+            node = MCTSNode(m, node, new_own, new_orb, 1 - node.player_id, global_TT, new_c0, new_c1)
             node.parent.children.append(node)
         else:
             winner = None
@@ -221,27 +276,32 @@ def get_move(state, player_id):
         sim_orb = list(node.orbs)
         sim_player = node.player_id
         
-        # Track initial rollout state natively
-        sim_c0, sim_c1 = 0, 0
-        for o in sim_own:
-            if o == 0: sim_c0 += 1
-            elif o == 1: sim_c1 += 1
+        # Inherit counts directly from node — no O(N) scan needed
+        sim_c0, sim_c1 = node.c0, node.c1
             
         if winner is None:
             for _ in range(8):
-                if time.time() - start_time > 0.930: break
+                if time.time() - start_time > 0.800: break
                 
-                # Natively bypass 'vm' filtering logic
-                max_orb = -1
+                # Rollout move: prefer near-critical cells adj to opponents.
+                # Filter out completely trapped cells (all neighbours are opponents)
+                # — exploding those hands free orbs to the enemy.
+                max_score = -1.0
                 hot_moves = []
+                sim_opp = 1 - sim_player
                 for i in range(N):
-                    if sim_own[i] != 1 - sim_player:
-                        o = sim_orb[i]
-                        if o > max_orb:
-                            max_orb = o
-                            hot_moves = [i]
-                        elif o == max_orb:
-                            hot_moves.append(i)
+                    if sim_own[i] == sim_opp:
+                        continue
+                    adj_opp = sum(1 for a in ADJ[i] if sim_own[a] == sim_opp)
+                    # Skip completely trapped cells
+                    if adj_opp == len(ADJ[i]):
+                        continue
+                    score = sim_orb[i] + 0.5 * adj_opp
+                    if score > max_score + 1e-9:
+                        max_score = score
+                        hot_moves = [i]
+                    elif abs(score - max_score) < 1e-9:
+                        hot_moves.append(i)
                             
                 if not hot_moves:
                     winner = 1 - sim_player
@@ -257,23 +317,43 @@ def get_move(state, player_id):
         if winner is None:
             my_mass, opp_mass = 0, 0
             my_cells, opp_cells = 0, 0
-            total_mass = 0
+            threat = 0.0
+            opportunity = 0.0
             
-            for i, o in enumerate(sim_own):
-                if o != -1:
-                    m = sim_orb[i]
-                    total_mass += m
-                    if o == player_id:
-                        my_mass += m
-                        my_cells += 1
-                    else:
-                        opp_mass += m
-                        opp_cells += 1
-                        
-            H_cluster = 1.0 if my_mass > opp_mass else (0.5 if my_mass == opp_mass else 0.0)
-            H_spread  = 1.0 if my_cells > opp_cells else (0.5 if my_cells == opp_cells else 0.0)
+            for i in range(N):
+                o = sim_own[i]
+                if o == -1:
+                    continue
+                orbs_i = sim_orb[i]
+                danger = orbs_i / CRITICAL[i]  # 0.0=empty to 1.0=at critical
+                if o == player_id:
+                    my_mass += orbs_i
+                    my_cells += 1
+                    # How much threat does my near-critical cell have vs opponents?
+                    for adj in ADJ[i]:
+                        if sim_own[adj] == 1 - player_id:
+                            opportunity += danger
+                else:
+                    opp_mass += orbs_i
+                    opp_cells += 1
+                    # How much does this opponent near-critical cell threaten my cells?
+                    for adj in ADJ[i]:
+                        if sim_own[adj] == player_id:
+                            threat += danger
+                            
+            # H_weighted: Weigh existing orbs AND potential territory
+            # Added a penalty for being surrounded and a bonus for controlling corners
+            my_weighted  = sum((sim_orb[i] + 0.5) * POS_VAL[i] for i in range(N) if sim_own[i] == player_id)
+            opp_weighted = sum((sim_orb[i] + 0.5) * POS_VAL[i] for i in range(N) if sim_own[i] == 1 - player_id)
+            H_weighted    = 1.0 if my_weighted  > opp_weighted  else (0.5 if my_weighted  == opp_weighted  else 0.0)
             
-            vic_score = (1.0 - _W) * H_cluster + _W * H_spread
+            H_spread      = 1.0 if my_cells > opp_cells else (0.5 if my_cells == opp_cells else 0.0)
+            max_pos       = max(opportunity + threat, 1e-9)
+            H_positional  = (opportunity - threat) / max_pos
+            H_positional  = (H_positional + 1.0) * 0.5
+            
+            # Weighted Mass and Positional Sensitivity are key to winning high-level games
+            vic_score = 0.50 * H_positional + 0.35 * H_weighted + 0.15 * H_spread
         else:
             vic_score = 1.0 if winner == player_id else 0.0
             
@@ -289,7 +369,10 @@ def get_move(state, player_id):
 
     if not root.children:
         vm = [i for i in range(N) if own[i] == player_id or own[i] == -1]
-        best_i = random.choice(vm) if vm else 0
+        # Heuristic: pick cell closest to critical with most opponent neighbors
+        def _score(i):
+            return (orb[i] / CRITICAL[i]) * sum(1 for a in ADJ[i] if own[a] == 1 - player_id)
+        best_i = max(vm, key=_score) if vm else 0
         return (best_i // COLS, best_i % COLS)
         
     max_visits = max(c.stats[1] for c in root.children)
