@@ -1,8 +1,8 @@
 from chain_reaction import ChainReactionGame
 
 # Pick which bots to run by changing these imports
-import claude_bot as bot1
-import ayush_bot as bot0
+import Ayush_bot as bot1
+import Ayush_bot as bot0
 import time
 
 def print_board(state):

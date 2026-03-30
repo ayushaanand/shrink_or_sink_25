@@ -3,9 +3,10 @@ train.py
 --------
 Implements the full training pipeline to faithfully reproduce the submitted model.
 Leverages Knowledge Distillation from a robust ResNet-50 Teacher.
+Includes RAM-caching for Kaggle T4 speedups and per-epoch accuracy reporting.
 
 Usage:
-    python train.py --dataset-path ./data --teacher-path teacher_best.pth --out final_submission.pth
+    python train.py --dataset-path ./data --teacher-path teacher_best.pth --model-path student_final.pth
 """
 
 import argparse
@@ -17,7 +18,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms, models
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
+from PIL import Image
 
 
 from model import DynamicNet
@@ -41,13 +43,40 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 def kd_loss(logits, teacher_logits, labels, T=4.0, alpha=0.9):
-    """Knowledge Distillation Loss combining hard labels and soft teacher probabilities."""
-    loss_ce = F.cross_entropy(logits, labels)
+    """Knowledge Distillation Loss combining hard labels and soft teacher probabilities.
+    Unlabeled samples (y=-1) use the teacher's argmax as a pseudo-label for CE.
+    """
     loss_kd = nn.KLDivLoss(reduction='batchmean')(
         F.log_softmax(logits/T, dim=1),
         F.softmax(teacher_logits/T, dim=1)
     ) * (T * T)
+    
+    # Substitute teacher pseudo-labels for unlabeled images (y == -1)
+    hard_labels = torch.where(labels == -1, teacher_logits.argmax(dim=1), labels)
+    loss_ce = F.cross_entropy(logits, hard_labels, label_smoothing=0.1)
+    
     return (1. - alpha) * loss_ce + alpha * loss_kd
+
+class RAMCachedSTL10(Dataset):
+    """Stores all 105k uint8 images into RAM for hyperspeed distillation."""
+    def __init__(self, stl10_datasets, transform=None, teacher_logits=None):
+        self.transform = transform
+        raw_data = np.concatenate([ds.data for ds in stl10_datasets], axis=0)
+        self.data = np.transpose(raw_data, (0, 2, 3, 1))
+        self.labels = np.concatenate([ds.labels for ds in stl10_datasets], axis=0)
+        self.teacher_logits = teacher_logits
+        
+    def __len__(self):
+        return len(self.data)
+        
+    def __getitem__(self, index):
+        img = Image.fromarray(self.data[index])
+        if self.transform is not None:
+            img = self.transform(img)
+        target = int(self.labels[index])
+        if self.teacher_logits is not None:
+            return img, target, self.teacher_logits[index]
+        return img, target
 
 def get_teacher(path, device, retries=3):
     """Loads the pre-trained Ultimate Teacher (ResNet-50) robustly against network I/O failures."""
@@ -69,14 +98,14 @@ def get_teacher(path, device, retries=3):
             print(f"⚠️ Warning: Failed to load teacher: {e}. Retrying in 5 seconds...")
             time.sleep(5)
             
-    raise RuntimeError("🚨 CRITICAL ERROR: Failed to load teacher after multiple attempts. The file might be corrupted.")
+    raise RuntimeError("🚨 CRITICAL ERROR: Failed to load teacher after multiple attempts.")
 
 def train(args):
     set_seed(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
+    print(f"Device Setting: {device}")
 
-    # STL-10 augmentations (ColorJitter + RandCrop/Flip)
+    # 1. Dataset Transforms
     train_tf = transforms.Compose([
         transforms.RandomCrop(96, padding=12),
         transforms.RandomHorizontalFlip(),
@@ -85,47 +114,70 @@ def train(args):
         transforms.Normalize(mean=[0.4467, 0.4398, 0.4066], std=[0.2603, 0.2566, 0.2713]),
     ])
     
-    print(f"Loading STL-10 training set to '{args.dataset_path}'...")
-    train_ds = datasets.STL10(root=args.dataset_path, split="train", download=True, transform=train_tf)
+    test_tf = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.4467, 0.4398, 0.4066], std=[0.2603, 0.2566, 0.2713]),
+    ])
+    
+    # 2. Loading Datasets
+    print(f"Loading STL-10 datasets to '{args.dataset_path}'...")
+    raw_train = datasets.STL10(root=args.dataset_path, split="train", download=not args.no_download)
+    raw_unlab = datasets.STL10(root=args.dataset_path, split="unlabeled", download=not args.no_download)
+    test_ds = datasets.STL10(root=args.dataset_path, split="test", download=not args.no_download, transform=test_tf)
+    test_ld = DataLoader(test_ds, batch_size=256, shuffle=False, num_workers=2, pin_memory=True)
+    
+    teacher = get_teacher(args.teacher_path, device)
+    
+    # 3. RAM Caching & Pre-Inference (The Secret Sauce)
+    print("Pre-inferencing Teacher on 105k images into RAM for hyperspeed...")
+    raw_ld = DataLoader(raw_unlab, batch_size=256, shuffle=False, num_workers=2)
+    teacher_logits = []
+    with torch.no_grad():
+        # Labeled teacher logits (precompute once)
+        l_ld = DataLoader(raw_train, batch_size=256, shuffle=False, num_workers=2)
+        for x, _ in l_ld: teacher_logits.append(teacher(x.to(device)).cpu())
+        # Unlabeled teacher logits
+        for x, _ in raw_ld: teacher_logits.append(teacher(x.to(device)).cpu())
+    
+    teacher_logits = torch.cat(teacher_logits, dim=0)
+    
+    train_cache = RAMCachedSTL10([raw_train, raw_unlab], transform=train_tf, teacher_logits=teacher_logits)
     
     g = torch.Generator()
     g.manual_seed(42)
-    
-    train_ld = DataLoader(
-        train_ds, 
-        batch_size=128, 
-        shuffle=True, 
-        num_workers=2, 
-        pin_memory=True,
-        worker_init_fn=seed_worker,
-        generator=g
-    )
+    train_ld = DataLoader(train_cache, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True, worker_init_fn=seed_worker, generator=g)
 
-    teacher = get_teacher(args.teacher_path, device)
+    # 4. Student Setup
+    print(f"Initializing Student (Widths: {args.widths}, Depths: {args.depths})...")
+    student = DynamicNet(widths=args.widths, depths=args.depths).to(device)
     if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs for Teacher!")
-        teacher = nn.DataParallel(teacher)
-    
-    print("Initializing tiny Student Model from model.py...")
-    student = DynamicNet().to(device)
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs for Student!")
         student = nn.DataParallel(student)
     
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    print(f"Starting Knowledge Distillation for {args.epochs} epochs...")
-    for epoch in range(1, args.epochs + 1):
+    # 5. Resume Support
+    start_epoch = 1
+    if os.path.exists(args.checkpoint):
+        print(f"🔄 Checkpoint found at '{args.checkpoint}'. Resuming training...")
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        student.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        start_epoch = ckpt['epoch'] + 1
+        print(f"▶️ Resuming from Epoch {start_epoch}")
+
+    # 6. Training & Validation Loop
+    print(f"Starting Training for {args.epochs} epochs with Batch Size {args.batch_size}...")
+    start_time = time.time()
+    
+    for epoch in range(start_epoch, args.epochs + 1):
         student.train()
         total_loss = 0.0
         
-        for step, (x, y) in enumerate(train_ld):
-            x, y = x.to(device), y.to(device)
+        for x, y, t_logits in train_ld:
+            x, y, t_logits = x.to(device), y.to(device), t_logits.to(device)
             
-            with torch.no_grad():
-                t_logits = teacher(x)
-                
             optimizer.zero_grad()
             s_logits = student(x)
             
@@ -137,18 +189,48 @@ def train(args):
             total_loss += loss.item()
             
         scheduler.step()
-        print(f"Epoch {epoch} | Loss: {total_loss/len(train_ld):.4f}")
+        
+        # Validation Pass (Per-Epoch Accuracy)
+        student.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for vx, vy in test_ld:
+                vx, vy = vx.to(device), vy.to(device)
+                preds = student(vx).argmax(dim=1)
+                correct += (preds == vy).sum().item()
+                total += vy.size(0)
+        
+        acc = 100.0 * correct / total
+        print(f"Epoch [{epoch:03d}/{args.epochs}] | Loss: {total_loss/len(train_ld):.4f} | Val Acc: {acc:.2f}%")
 
-    print(f"\nTraining Complete! Saving final weights (FP16 Compressed) to '{args.out}'...")
-    student.half() # Cast weights to 16-bit to cut file size by 50%
+        # Save Checkpoint for Auto-Resume
+        checkpoint_data = {
+            'epoch': epoch,
+            'model_state_dict': student.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+        }
+        torch.save(checkpoint_data, args.checkpoint)
+
+    end_time = time.time()
+    print(f"\nTraining Complete in {(end_time - start_time)/60:.2f} mins!")
+    print(f"Final Student Weights cast to FP16. Saving to '{args.model_path}'...")
+    
+    student.half()
     save_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
-    torch.save(save_state, args.out)
+    torch.save(save_state, args.model_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset-path", type=str, required=True, help="Path for STL-10 dataset")
-    parser.add_argument("--teacher-path", type=str, required=True, help="Path to teacher weights")
-    parser.add_argument("--out", type=str, default="final_submission.pth", help="Output filename")
-    parser.add_argument("--epochs", type=int, default=100, help="Training length")
-    parser.add_argument("--lr", type=float, default=2e-3, help="Learning rate")
+    parser.add_argument("--dataset-path", type=str, required=True)
+    parser.add_argument("--teacher-path", type=str, required=True)
+    parser.add_argument("--model-path", type=str, default="student_final.pth")
+    parser.add_argument("--checkpoint", type=str, default="student_checkpoint.pth")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--widths", type=int, nargs='+', default=[32, 64, 128, 256])
+    parser.add_argument("--depths", type=int, nargs='+', default=[2, 2, 2, 2])
+    parser.add_argument("--no-download", action="store_true")
     train(parser.parse_args())
