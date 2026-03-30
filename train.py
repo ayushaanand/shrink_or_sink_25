@@ -219,7 +219,13 @@ def train(args):
     
     student.half()
     save_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
-    torch.save(save_state, args.model_path)
+    
+    # ── Legacy List Optimization ──
+    # Saves as a [widths, depths, tensor0, ...] list to eliminate key overhead.
+    # We use explicit alphabetical sorting to ensure deterministic packing/unpacking.
+    keys = sorted(save_state.keys())
+    weights_list = [args.widths, args.depths] + [save_state[k].cpu() for k in keys]
+    torch.save(weights_list, args.model_path, _use_new_zipfile_serialization=False)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
