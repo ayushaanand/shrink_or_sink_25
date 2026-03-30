@@ -121,8 +121,8 @@ def train(args):
     
     # 2. Loading Datasets
     print(f"Loading STL-10 datasets to '{args.dataset_path}'...")
-    raw_train = datasets.STL10(root=args.dataset_path, split="train", download=not args.no_download)
-    raw_unlab = datasets.STL10(root=args.dataset_path, split="unlabeled", download=not args.no_download)
+    raw_train = datasets.STL10(root=args.dataset_path, split="train", download=not args.no_download, transform=test_tf)
+    raw_unlab = datasets.STL10(root=args.dataset_path, split="unlabeled", download=not args.no_download, transform=test_tf)
     test_ds = datasets.STL10(root=args.dataset_path, split="test", download=not args.no_download, transform=test_tf)
     test_ld = DataLoader(test_ds, batch_size=256, shuffle=False, num_workers=2, pin_memory=True)
     
