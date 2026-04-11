@@ -1,68 +1,67 @@
-"""
-test.py
--------
-Implements the evaluation/inference pipeline for the Shrink or Sink competition.
-Loads the final submission `.pth` file and evaluates on the STL-10 test set.
-
-Usage:
-    python test.py --dataset-path ./data --model-path final_model.pth
-"""
-
-import argparse
-import torch
-from torchvision import datasets, transforms
+import argparse, re, torch, torchvision
+import torch.nn as nn
+import torchvision.models as models
+import torchvision.transforms as T
 from torch.utils.data import DataLoader
 from model import DynamicNet
 
-def evaluate(dataset_path, model_path):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+def infer_architecture(state_dict):
+    new_sd = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    if "layer1.0.conv1.weight" in new_sd:
+        return None, None, new_sd, "teacher"
+    if "conv1.0.weight" in new_sd:
+        stage_out, stage_max = {}, {}
+        pat = re.compile(r"^features\.(\d+)\.stage\.(\d+)\.pw_bn\.weight$")
+        for k, v in new_sd.items():
+            m = pat.match(k)
+            if m:
+                s, d = int(m.group(1)), int(m.group(2))
+                stage_out[s] = v.shape[0]
+                stage_max[s] = max(stage_max.get(s, 0), d)
+        n = max(stage_out.keys()) + 1
+        return [stage_out[s] for s in range(n)], [stage_max[s]+1 for s in range(n)], new_sd, "student"
+    raise KeyError("Unknown Architecture")
 
-    # STL-10 basic validation transforms (no augmentation!)
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.4467, 0.4398, 0.4066], std=[0.2603, 0.2566, 0.2713]),
-    ])
-
-    print(f"Loading test set from '{dataset_path}'...")
-    test_ds = datasets.STL10(root=dataset_path, split="test", download=True, transform=transform)
-    test_ld = DataLoader(test_ds, batch_size=256, shuffle=False, num_workers=2, pin_memory=True)
-
-    print("Initializing model skeleton from model.py...")
-    model = DynamicNet() # Automatically uses WINNING_WIDTHS fallback
-    
-    print(f"Loading weights from '{model_path}'...")
-    state_dict = torch.load(model_path, map_location=device)
-    # The file is saved as FP16, so we convert back to FP32 for standard inference evaluation
-    state_dict = {k: v.float() for k, v in state_dict.items()}
-    model.load_state_dict(state_dict)
-    model = model.to(device)
-    model.eval()
-
-    correct = 0
-    total = len(test_ds)
-
-    print("Running inference...")
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--dataset-path", type=str, required=True)
+    p.add_argument("--model-path", type=str, required=True)
+    p.add_argument("--widths", type=int, nargs='+')
+    p.add_argument("--depths", type=int, nargs='+')
+    p.add_argument("--no-download", action="store_true")
+    p.add_argument("--batch-size", type=int, default=256)
+    args = p.parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"))
+    ckpt = torch.load(args.model_path, map_location="cpu")
+    if isinstance(ckpt, list):
+        if isinstance(ckpt[0], list) and isinstance(ckpt[1], list):
+            w, d, weights = ckpt[0], ckpt[1], ckpt[2:]
+        else:
+            w, d, weights = args.widths, args.depths, ckpt
+        model = DynamicNet(widths=w, depths=d)
+        keys = sorted(model.state_dict().keys())
+        model.load_state_dict(dict(zip(keys, weights)))
+    else:
+        raw = ckpt.get("model", ckpt.get("state_dict", ckpt.get("model_state_dict", ckpt.get("model_state", ckpt))))
+        w_inf, d_inf, sd, m_type = infer_architecture(raw)
+        w, d = (args.widths or w_inf), (args.depths or d_inf)
+        if m_type == "teacher":
+            model = models.resnet50(weights=None)
+            model.fc = nn.Linear(model.fc.in_features, 10)
+        else:
+            model = DynamicNet(widths=w, depths=d)
+        model.load_state_dict(sd, strict=True)
+    model.to(device).eval()
+    test_tf = T.Compose([T.ToTensor(), T.Normalize(mean=[0.4467,0.4398,0.4066], std=[0.2603,0.2566,0.2713])])
+    test_ds = torchvision.datasets.STL10(root=args.dataset_path, split="test", download=not args.no_download, transform=test_tf)
+    test_ld = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    correct, total = 0, 0
     with torch.no_grad():
         for x, y in test_ld:
             x, y = x.to(device), y.to(device)
-            preds = model(x).argmax(dim=1)
-            correct += (preds == y).sum().item()
-
-    accuracy = (correct / total) * 100.0
-    print("-" * 40)
-    print(f"Final Test Accuracy: {accuracy:.2f}%")
-    print("-" * 40)
-    
-    if accuracy >= 85.0:
-        print("✅ Threshold passed! This model is eligible for score points.")
-    else:
-        print("❌ Model did not achieve 85% accuracy threshold.")
+            correct += (model(x).argmax(1) == y).sum().item()
+            total += y.size(0)
+    print(f"\nAccuracy: {100.0 * correct / total:.2f}%")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset-path", type=str, required=True, help="Path to STL-10 dataset folder")
-    parser.add_argument("--model-path", type=str, required=True, help="Path to the trained .pth file")
-    args = parser.parse_args()
-    
-    evaluate(args.dataset_path, args.model_path)
+    main()

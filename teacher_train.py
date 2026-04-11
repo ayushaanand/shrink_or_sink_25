@@ -10,7 +10,7 @@ Pipeline (200 Epochs):
   - Phase C (Mastery) : Epoch 51 to 200 (Train heavily on combined Augmented Labeled + High-Conf Pseudo)
 
 Usage:
-    python teacher_train.py --data ./data --out teacher_best.pth
+    python teacher_train.py --dataset-path ./data --out teacher_best.pth
 """
 
 import argparse
@@ -37,14 +37,15 @@ def set_seed(seed=42):
 set_seed(42)
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--data", type=str, default="./data")
+parser.add_argument("--dataset-path", type=str, default="./data")
 parser.add_argument("--out", type=str, default="teacher_best.pth")
 parser.add_argument("--checkpoint", type=str, default="/content/drive/MyDrive/sos_checkpoints/teacher_latest.pth")
-parser.add_argument("--batch", type=int, default=128)
+parser.add_argument("--batch-size", type=int, default=128)
 parser.add_argument("--burn-in", type=int, default=50)
 parser.add_argument("--mastery", type=int, default=150)
 parser.add_argument("--strictness", type=float, default=0.98, help="Confidence threshold for pseudo-labels")
 parser.add_argument("--weights", type=str, default="", help="Path to initialized weights (for finetuning/warm restart)")
+parser.add_argument("--no-download", action="store_true", help="Skip dataset download")
 args = parser.parse_args()
 
 TOTAL_EPOCHS = args.burn_in + args.mastery
@@ -70,12 +71,12 @@ clean_tf = transforms.Compose([
 
 
 # ── Datasets & Loaders ─────────────────────────────────────────────────────────
-train_ds = STL10(root=args.data, split="train", download=True, transform=train_tf)
-val_ds   = STL10(root=args.data, split="test",  download=True, transform=clean_tf)
-unlab_ds = STL10(root=args.data, split="unlabeled", download=True, transform=clean_tf)
+train_ds = STL10(root=args.dataset_path, split="train", download=not args.no_download, transform=train_tf)
+val_ds   = STL10(root=args.dataset_path, split="test",  download=not args.no_download, transform=clean_tf)
+unlab_ds = STL10(root=args.dataset_path, split="unlabeled", download=not args.no_download, transform=clean_tf)
 
-val_ld   = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=2, pin_memory=True)
-unlab_ld = DataLoader(unlab_ds, batch_size=args.batch, shuffle=False, num_workers=2, pin_memory=True)
+val_ld   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+unlab_ld = DataLoader(unlab_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
 class PseudoDataset(torch.utils.data.Dataset):
     def __init__(self, x_tensor, y_tensor):
@@ -92,13 +93,13 @@ class PseudoDataset(torch.utils.data.Dataset):
 def get_active_loader(epoch, pseudo_dataset=None):
     if epoch <= args.burn_in or pseudo_dataset is None:
         print(f"  [Loader] Using only {len(train_ds)} original labeled images (Burn-in).")
-        return DataLoader(train_ds, batch_size=args.batch, shuffle=True, num_workers=2, pin_memory=True)
+        return DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
     else:
         combined_ds = ConcatDataset([train_ds, pseudo_dataset])
         print(f"  [Loader] Using combined {len(combined_ds)} images (Mastery Phase).")
         # Set num_workers=0 here! A huge in-memory tensor duplicated across multiple workers 
         # causes a 'copy-on-write' memory explosion and crashes Kaggle system RAM after many epochs.
-        return DataLoader(combined_ds, batch_size=args.batch, shuffle=True, num_workers=0, pin_memory=True)
+        return DataLoader(combined_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
 
 
 # ── CutMix Implementation ──────────────────────────────────────────────────────
