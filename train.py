@@ -89,9 +89,13 @@ def train(args):
     start_epoch = 1
     if os.path.exists(args.checkpoint):
         ckpt = torch.load(args.checkpoint, map_location=device)
-        student.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        student_sd = ckpt.get('model_state_dict', ckpt.get('model_state', {}))
+        if isinstance(student, nn.DataParallel):
+            student.module.load_state_dict(student_sd)
+        else:
+            student.load_state_dict(student_sd)
+        optimizer.load_state_dict(ckpt.get('optimizer_state_dict', ckpt.get('optimizer_state', {})))
+        scheduler.load_state_dict(ckpt.get('scheduler_state_dict', ckpt.get('scheduler_state', {})))
         start_epoch = ckpt['epoch'] + 1
     for epoch in range(start_epoch, args.epochs + 1):
         student.train()
@@ -106,7 +110,8 @@ def train(args):
             total_loss += loss.item()
         scheduler.step()
         print(f"Epoch [{epoch:03d}/{args.epochs}] | Loss: {total_loss/len(train_ld):.4f}")
-        torch.save({'epoch': epoch, 'model_state_dict': student.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict()}, args.checkpoint)
+        save_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
+        torch.save({'epoch': epoch, 'model_state_dict': save_state, 'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict()}, args.checkpoint)
     student.half()
     save_state = student.module.state_dict() if isinstance(student, nn.DataParallel) else student.state_dict()
     keys = sorted(save_state.keys())

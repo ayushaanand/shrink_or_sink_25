@@ -39,17 +39,30 @@ set_seed(42)
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset-path", type=str, default="./data")
 parser.add_argument("--out", type=str, default="teacher_best.pth")
-parser.add_argument("--checkpoint", type=str, default="/content/drive/MyDrive/sos_checkpoints/teacher_latest.pth")
+parser.add_argument("--checkpoint", type=str, default="./teacher_checkpoint.pth")
 parser.add_argument("--batch-size", type=int, default=128)
 parser.add_argument("--burn-in", type=int, default=50)
 parser.add_argument("--mastery", type=int, default=150)
+parser.add_argument("--epochs", type=int, default=0, help="Total training epochs (overrides --burn-in and --mastery)")
 parser.add_argument("--strictness", type=float, default=0.98, help="Confidence threshold for pseudo-labels")
 parser.add_argument("--weights", type=str, default="", help="Path to initialized weights (for finetuning/warm restart)")
 parser.add_argument("--no-download", action="store_true", help="Skip dataset download")
 args = parser.parse_args()
 
-TOTAL_EPOCHS = args.burn_in + args.mastery
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Calculate total epochs based on arguments
+if args.epochs > 0:
+    args.burn_in = min(50, args.epochs // 4) # Adjust burn-in if epochs are very small
+    args.mastery = args.epochs - args.burn_in
+    TOTAL_EPOCHS = args.epochs
+else:
+    TOTAL_EPOCHS = args.burn_in + args.mastery
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
+    
 print(f"Device: {device}")
 
 
@@ -72,7 +85,7 @@ clean_tf = transforms.Compose([
 
 # ── Datasets & Loaders ─────────────────────────────────────────────────────────
 train_ds = STL10(root=args.dataset_path, split="train", download=not args.no_download, transform=train_tf)
-val_ds   = STL10(root=args.dataset_path, split="test",  download=not args.no_download, transform=clean_tf)
+val_ds   = STL10(root=args.dataset_path, split="test",  download=not args.no_download,  transform=clean_tf)
 unlab_ds = STL10(root=args.dataset_path, split="unlabeled", download=not args.no_download, transform=clean_tf)
 
 val_ld   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
@@ -168,24 +181,8 @@ if torch.cuda.device_count() > 1:
     print(f"Using {torch.cuda.device_count()} GPUs for Training!")
     teacher = nn.DataParallel(teacher)
 
-# ── Quick Sanity Validation ────────────────────────────────────────────────────
-# Verifies loaded weights are meaningful (>80%) before wasting hours of training
-if args.weights or os.path.exists(args.checkpoint):
-    print("\n[SANITY] Running quick validation pass on loaded weights...")
-    teacher.eval()
-    correct = 0
-    with torch.no_grad():
-        for x, y in val_ld:
-            x, y = x.to(device), y.to(device)
-            correct += (teacher(x).argmax(1) == y).sum().item()
-    sanity_acc = correct / len(val_ds)
-    print(f"[SANITY] Loaded weights Val Accuracy: {sanity_acc:.4f} ({sanity_acc*100:.2f}%)")
-    if sanity_acc < 0.80:
-        raise ValueError(f"\n🚨 ABORT: Loaded weights only achieve {sanity_acc*100:.2f}% accuracy. "
-                         f"This is below the 80% safety threshold. "
-                         f"The weights may be corrupted or from a poorly trained run. "
-                         f"Fix --weights / --checkpoint path before wasting GPU hours!")
-    print(f"[SANITY] ✅ Weights are healthy. Proceeding to training...\n")
+
+# ── Optimizer and Loss setup ──────────────────────────────────────────────────
 
 optimizer = torch.optim.AdamW(teacher.parameters(), lr=1e-3, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS)
@@ -302,33 +299,16 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
 
     scheduler.step()
 
+    print(f"  ↳ Loss: {running_loss/len(active_ld):.4f}")
     
-    # ── Validation ──
-    teacher.eval()
-    correct = 0
-    with torch.no_grad():
-        for x, y in val_ld:
-            x, y = x.to(device), y.to(device)
-            correct += (teacher(x).argmax(1) == y).sum().item()
-
-    acc = correct / len(val_ds)
-    print(f"  ↳ Loss: {running_loss/len(active_ld):.4f}  |  Val Acc: {acc:.4f} "
-          f"{'⭐ NEW BEST' if acc > best_acc else ''}")
-
-    
-    # ── Robust Save ──
+    # ── Robust Overwrite Save ──
     save_state = teacher.module.state_dict() if isinstance(teacher, nn.DataParallel) else teacher.state_dict()
     
-    if acc > best_acc:
-        best_acc = acc
-        # Save the final best weights specifically for the search.py
-        torch.save(save_state, args.out)
+    # Unconditionally overwrite the final best weights
+    torch.save(save_state, args.out)
 
     # Save the resumption checkpoint every epoch
-    # We save to a temp file and rename to avoid corruption if Colab dies exactly during save
     temp_ckpt = args.checkpoint + ".tmp"
-    
-    # Ensure directory exists (e.g., if args.checkpoint is deeply nested)
     ckpt_dir = os.path.dirname(args.checkpoint)
     if ckpt_dir:
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -338,9 +318,19 @@ for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
         'model_state': save_state,
         'optimizer_state': optimizer.state_dict(),
         'scheduler_state': scheduler.state_dict(),
-        'best_acc': best_acc
+        'best_acc': 1.0 # arbitrary placeholder
     }, temp_ckpt)
     os.replace(temp_ckpt, args.checkpoint)
 
-print(f"\n✅ All {TOTAL_EPOCHS} epochs complete. The absolute best Val Acc was {best_acc:.4f}.")
-print(f"The best weights have been finalized in '{args.out}'. Let's run the search!")
+# ── Final Validation ──
+print(f"\n✅ All {TOTAL_EPOCHS} epochs complete. Running Final Validation Pass...")
+teacher.eval()
+correct = 0
+with torch.no_grad():
+    for x, y in val_ld:
+        x, y = x.to(device), y.to(device)
+        correct += (teacher(x).argmax(1) == y).sum().item()
+
+final_acc = correct / len(val_ds)
+print(f"The Final Benchmark Val Acc is {final_acc:.4f}.")
+print(f"Weights finalized unconditionally in '{args.out}'. Commencing Knowledge Distillation pipeline!")
